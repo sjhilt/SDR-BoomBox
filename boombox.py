@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-boombox: a boombox‑style Python GUI that wraps theori‑io/nrsc5
+boombox5: a boombox‑style Python GUI that wraps theori‑io/nrsc5
 
 Requirements (install these first):
   • Python 3.9+
@@ -10,11 +10,11 @@ Requirements (install these first):
   • FFmpeg (for ffplay) in PATH (https://ffmpeg.org)
   • An RTL‑SDR (or use -r file capture) attached
 
-This MVP launches nrsc5 and streams its WAV audio to ffplay. The GUI
+This app launches nrsc5 and streams its WAV audio to ffplay. The GUI
 looks like a retro boombox with big play/stop, a tuner dial, program buttons,
 VU meters, and a faux LCD. It also shows basic log/metadata lines.
 
-New: If the station doesn’t provide embedded AAS art, we do a background
+If the station doesn’t provide embedded AAS art, we do a background
 lookup for album art using the iTunes Search API based on artist/title.
 
 Notes:
@@ -22,8 +22,6 @@ Notes:
   • We forward stdout from nrsc5 -> stdin of ffplay on a background thread.
   • On Windows, make sure libnrsc5.dll and nrsc5.exe are reachable; see README.
   • On macOS/Linux, ensure permissions for your RTL-SDR and that ffplay exists.
-
-This is a starter template – extend as you like (album art, presets, scans).
 """
 
 import os
@@ -34,11 +32,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
 import json
 import urllib.parse
 import requests
 
-APP_NAME = "boombox"
+APP_NAME = "boombox5"
+
 
 # ---------- Utility ----------
 
@@ -48,12 +48,14 @@ def which(cmd: str) -> bool:
         for p in os.getenv("PATH", "").split(os.pathsep)
     )
 
+
 @dataclass
 class NRSC5Config:
     frequency_mhz: float = 99.5
     program: int = 0  # 0..3
     gain: float | None = None
     device_index: int | None = None
+
 
 # ---------- Worker that pipes nrsc5 -> ffplay ----------
 
@@ -140,9 +142,9 @@ class RadioWorker(QtCore.QObject):
                     except Exception:
                         pass
 
-            self._forward_thread = threading.Thread(target=forward, daemon=True)
+            self._forward_thread = threading.Thread(target=forward, daemon=True, name="audio-forward")
             self._forward_thread.start()
-            threading.Thread(target=read_logs, daemon=True).start()
+            threading.Thread(target=read_logs, daemon=True, name="stderr-reader").start()
 
             self.started.emit()
         except FileNotFoundError as e:
@@ -164,7 +166,10 @@ class RadioWorker(QtCore.QObject):
             try:
                 # Closing stdin signals EOF -> exit
                 if self._ffplay.stdin:
-                    self._ffplay.stdin.close()
+                    try:
+                        self._ffplay.stdin.close()
+                    except Exception:
+                        pass
                 self._ffplay.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self._ffplay.kill()
@@ -172,12 +177,13 @@ class RadioWorker(QtCore.QObject):
         self._ffplay = None
         self.stopped.emit(rc)
 
+
 # ---------- Main Window (boombox UI) ----------
 
 class BoomboxUI(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("boombox – HD Radio (NRSC‑5)")
+        self.setWindowTitle("boombox5 – HD Radio (NRSC‑5)")
         self.setMinimumSize(980, 520)
         self.setStyleSheet(
             """
@@ -209,7 +215,9 @@ class BoomboxUI(QtWidgets.QMainWindow):
 
         # LCD display
         self.lcd = QtWidgets.QLabel("—.—— MHz  P0  ⏸", objectName="lcd")
-        f = self.lcd.font(); f.setPointSize(26); self.lcd.setFont(f)
+        f = self.lcd.font()
+        f.setPointSize(26)
+        self.lcd.setFont(f)
         self.lcd.setAlignment(QtCore.Qt.AlignCenter)
         center.addWidget(self.lcd)
 
@@ -295,6 +303,7 @@ class BoomboxUI(QtWidgets.QMainWindow):
         self.play_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self._stop)
         self.scan_btn.clicked.connect(self._scan)
+        # Important: connect to a slot we implement
         self.prog_group.idToggled.connect(self._prog_changed)
         self.volume.valueChanged.connect(self._set_volume)
         self.worker.logLine.connect(self._handle_log_line)
@@ -302,12 +311,6 @@ class BoomboxUI(QtWidgets.QMainWindow):
         self.worker.stopped.connect(lambda rc: self._append_log(f"[audio] stopped rc={rc}"))
 
         self._update_lcd()
-
-        # Basic sanity checks
-        if not which("nrsc5"):
-            self._append_log("WARNING: nrsc5 was not found in PATH.")
-        if not which("ffplay"):
-            self._append_log("WARNING: ffplay (FFmpeg) was not found in PATH.")
 
         # Basic sanity checks
         if not which("nrsc5"):
@@ -366,11 +369,11 @@ class BoomboxUI(QtWidgets.QMainWindow):
                 parts = [p.strip() for p in s.split("|")]
                 for p in parts:
                     if p.lower().startswith("title:"):
-                        self._title = p.split(":",1)[1].strip()
+                        self._title = p.split(":", 1)[1].strip()
                     if p.lower().startswith("artist:"):
-                        self._artist = p.split(":",1)[1].strip()
+                        self._artist = p.split(":", 1)[1].strip()
                     if p.lower().startswith("album:"):
-                        self._album = p.split(":",1)[1].strip()
+                        self._album = p.split(":", 1)[1].strip()
                 updated = True
             except Exception:
                 pass
@@ -397,6 +400,7 @@ class BoomboxUI(QtWidgets.QMainWindow):
     def _scan(self):
         # Very simple scan: step 0.2 MHz across the band and log carriers that lock quickly
         self._append_log("[scan] starting quick scan (very basic)")
+
         def do_scan():
             orig_freq = self._mhz()
             step = 0.2
@@ -404,21 +408,37 @@ class BoomboxUI(QtWidgets.QMainWindow):
             for i in range(880, 1081, int(step * 10)):
                 if self.worker._nrsc5:  # stop if playing
                     break
-                f = i/10.0
+                f = i / 10.0
                 try:
-                    p = subprocess.Popen(["nrsc5", "-q", "-o", "-", f"{f}", "0"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    p = subprocess.Popen(["nrsc5", "-q", "-o", "-", f"{f}", "0"],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     try:
                         out, err = p.communicate(timeout=2.5)
                     except subprocess.TimeoutExpired:
-                        p.kill(); out, err = p.communicate()
+                        p.kill()
+                        out, err = p.communicate()
                     if b"Program 0" in err or b"Audio" in err or b"Acquiring" in err:
                         found.append(f)
                         self.worker.logLine.emit(f"[scan] possible HD at {f:.1f} MHz")
                 except Exception:
                     pass
             self.worker.logLine.emit("[scan] done: " + ", ".join(f"{x:.1f}" for x in found) if found else "none")
-            self.freq_slider.setValue(int(orig_freq*10))
-        threading.Thread(target=do_scan, daemon=True).start()
+            self.freq_slider.setValue(int(orig_freq * 10))
+
+        threading.Thread(target=do_scan, daemon=True, name="quick-scan").start()
+
+    # --- Program button toggles ---
+    @QtCore.Slot(int, bool)
+    def _prog_changed(self, id: int, checked: bool):
+        """Update the selected HD subchannel (program 0–3) when a button toggles."""
+        if not checked:
+            return
+        self.cfg.program = id
+        self._update_lcd()
+        # Optional: auto-retune if already playing.
+        # if self.worker and self.worker._nrsc5:
+        #     self._stop()
+        #     self._start()
 
     # --- Album art lookup ---
     def _fetch_album_art(self):
@@ -428,7 +448,7 @@ class BoomboxUI(QtWidgets.QMainWindow):
         if key in self._art_cache:
             self.art.setPixmap(self._art_cache[key].scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
             return
-        threading.Thread(target=self._fetch_art_worker, args=(key, self._artist, self._title, self._album), daemon=True).start()
+        threading.Thread(target=self._fetch_art_worker, args=(key, self._artist, self._title, self._album), daemon=True, name="art-fetch").start()
 
     def _fetch_art_worker(self, key: str, artist: str | None, title: str | None, album: str | None):
         try:
@@ -461,7 +481,17 @@ class BoomboxUI(QtWidgets.QMainWindow):
             self._append_log(f"[art] lookup failed: {e}")
         # fallback UI
         self.art.setText("No Art")
-        
+
+    # --- Ensure clean shutdown ---
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        try:
+            self._stop()
+            if self.thread and self.thread.isRunning():
+                self.thread.quit()
+                self.thread.wait(2000)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 # ---------- Run ----------
