@@ -51,6 +51,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 APP_NAME = "SDR-Boombox"
 FALLBACK_TIMEOUT_S = 6.0                       # time to wait for HD sync before analog fallback
 PRESETS_PATH = Path.home() / ".sdr_boombox_presets.json"
+ART_DIR = Path.home() / ".sdr_boombox_art"     # where nrsc5 drops LOT images
+ART_DIR.mkdir(parents=True, exist_ok=True)
 
 def which(cmd: str) -> str | None:
     p = shutil.which(cmd)
@@ -87,6 +89,7 @@ class Worker(QtCore.QObject):
     stopped = QtCore.Signal(int, str)  # rc, mode
     logLine = QtCore.Signal(str)
     hdSynced = QtCore.Signal()
+    artReady = QtCore.Signal(str)      # path to new artwork
 
     def __init__(self, cfg: Cfg):
         super().__init__()
@@ -109,9 +112,13 @@ class Worker(QtCore.QObject):
         return base
 
     def nrsc5_cmd(self) -> list[str]:
+        # IMPORTANT: use lowercase -o for PCM audio to stdout
         cmd = ["nrsc5"]
-        if self.cfg.gain is not None: cmd += ["-g", str(self.cfg.gain)]
-        if self.cfg.device_index is not None: cmd += ["-d", str(self.cfg.device_index)]
+        if self.cfg.gain is not None:
+            cmd += ["-g", str(self.cfg.gain)]
+        if self.cfg.device_index is not None:
+            cmd += ["-d", str(self.cfg.device_index)]
+        # write decoded audio (PCM) to stdout for ffplay
         cmd += ["-o", "-", f"{self.cfg.mhz}", f"{self.cfg.hd_prog}"]
         return cmd
 
@@ -126,7 +133,7 @@ class Worker(QtCore.QObject):
             "-E", "deemp=75",      # US deemphasis explicit
             "-l", "0",             # squelch off
             "-g", "0",             # auto-gain
-            "-A", "fast",          # faster AFC
+            "-A", "fast",          # AFC (you can remove if it drifts)
         ]
         if self.cfg.ppm:
             cmd += ["-p", str(int(self.cfg.ppm))]
@@ -167,6 +174,22 @@ class Worker(QtCore.QObject):
         except Exception:
             pass
 
+    def _emit_latest_art(self, delay_s: float = 0.25):
+        """Pick the newest .png/.jpg from ART_DIR after a tiny delay and emit it."""
+        def run():
+            time.sleep(delay_s)
+            try:
+                pics = sorted(
+                    [p for p in ART_DIR.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+                if pics:
+                    self.artReady.emit(str(pics[0]))
+            except Exception:
+                pass
+        threading.Thread(target=run, daemon=True, name="art-latest").start()
+
     # ---------- slots ----------
     @QtCore.Slot()
     def stop(self):
@@ -201,8 +224,15 @@ class Worker(QtCore.QObject):
             self._pipe_forward(self._nrsc5.stdout, self._ffplay.stdin)
 
             def parse(line: str):
+                # HD lock hints
                 if ("Synchronized" in line) or ("Audio program" in line) or ("SIG Service:" in line):
                     self.hdSynced.emit()
+                # LOT file notifications -> try to show newest art
+                # Example lines in your logs:
+                # LOT file: port=0800 ... name=MT0044800393_1007807.jpg size=4552 ...
+                # LOT file: port=0810 ... name=TMT_... .png ...
+                if "LOT file:" in line and (".png" in line.lower() or ".jpg" in line.lower() or ".jpeg" in line.lower()):
+                    self._emit_latest_art(0.2)
 
             self._stderr_reader(self._nrsc5, "", parse)
             self.started.emit("hd")
@@ -242,7 +272,6 @@ class Worker(QtCore.QObject):
         out, err = proc.communicate(timeout=60)
 
         # Parse last CSV line (bins)
-        # CSV columns end with bin powers after the header columns
         lines = [l.strip() for l in out.splitlines() if l.strip()]
         if not lines:
             return []
@@ -379,7 +408,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # --- right: art + metadata ---
         right = QtWidgets.QVBoxLayout()
         self.art = QtWidgets.QLabel(objectName="art"); self.art.setFixedSize(260,260)
-        self.art.setAlignment(QtCore.Qt.AlignCenter); self.art.setText("No Art")
+        self.art.setAlignment(QtCore.Qt.AlignCenter); self._set_art_placeholder()
         right.addWidget(self.art)
 
         self.meta_card = QtWidgets.QFrame(objectName="metaCard")
@@ -424,6 +453,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.worker.started.connect(self._on_started)
         self.worker.stopped.connect(self._on_stopped)
         self.worker.hdSynced.connect(self._on_hd_synced)
+        self.worker.artReady.connect(self._set_art_path)
 
         self._update_lcd()
 
@@ -494,6 +524,30 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _append_log(self, s: str):
         self.log.append(s)
 
+    def _set_art_placeholder(self, text="No Art"):
+        # subtle placeholder so the box doesn't collapse
+        self.art.setText(text)
+        self.art.setPixmap(QtGui.QPixmap())
+
+    def _set_art_pixmap(self, pm: QtGui.QPixmap):
+        if pm.isNull():
+            self._set_art_placeholder()
+            return
+        # scale while preserving aspect ratio, fill letterbox
+        target = self.art.size()
+        scaled = pm.scaled(target, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        self.art.setPixmap(scaled)
+        self.art.setText("")
+
+    @QtCore.Slot(str)
+    def _set_art_path(self, path: str):
+        pm = QtGui.QPixmap(path)
+        if pm.isNull():
+            # try tiny backoff once in case of slow writes
+            QtCore.QTimer.singleShot(200, lambda: self._set_art_path(path))
+            return
+        self._set_art_pixmap(pm)
+
     # ----- UI slots -----
     def _play_clicked(self):
         self.cfg.mhz = self._mhz()
@@ -519,6 +573,12 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _on_started(self, mode: str):
         self._append_log(f"[audio] started ({mode})")
         self.lcd.setText(self.lcd.text().replace("⏸", "▶", 1))
+        if mode == "hd":
+            # keep existing art if present; many stations reuse the same logo
+            pass
+        else:
+            # analog mode — clear art (no LOT images in FM)
+            self._set_art_placeholder("Analog FM")
 
     def _on_stopped(self, rc: int, mode: str):
         self._append_log(f"[audio] stopped rc={rc} ({mode})")
@@ -537,6 +597,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._append_log(f"[fallback] no HD sync in {FALLBACK_TIMEOUT_S:.0f}s, switching to analog FM")
         self.meta_title.setText("SDR-Boombox (Analog FM Mode)")
         self.meta_sub.setText("by @sjhilt")
+        self._set_art_placeholder("Analog FM")
         QtCore.QMetaObject.invokeMethod(self.worker, "start_fm")
 
     # ----- metadata/log parsing -----
@@ -594,12 +655,11 @@ class SDRBoombox(QtWidgets.QMainWindow):
             except Exception as e:
                 stations = []
                 self._append_log(f"[scan] error: {e}")
-            QtCore.QMetaObject.invokeMethod(self, "_scan_done",
-                                            QtCore.Qt.QueuedConnection,
-                                            QtCore.Q_ARG(list, stations))
+            # Use Qt queued invoke without Q_ARG(list) to avoid PySide metatype issues
+            QtCore.QTimer.singleShot(0, lambda: self._scan_done(stations))
         threading.Thread(target=do_scan, daemon=True).start()
 
-    @QtCore.Slot(list)
+    @QtCore.Slot()
     def _scan_done(self, stations: list):
         self.btn_scan.setEnabled(True)
         if not stations:
@@ -643,7 +703,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    # (User asked for tray only earlier; we can set a global icon here too later if desired)
     w = SDRBoombox(); w.show()
     sys.exit(app.exec())
 
