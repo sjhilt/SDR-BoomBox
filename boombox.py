@@ -1,15 +1,45 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-sdr_boombox: QoL fixes for metadata display and "segment/no track" handling
+===============================================================
+   SDR-Boombox
+   HD Radio (NRSC-5) + Analog FM Receiver & Visual Interface
+===============================================================
 
-Changes vs boombox5:
-  1) Full-title display: removed pixel-width eliding. Titles/artists now wrap across lines.
-     Optional marquee for super-long lines (toggle MARQUEE=True).
-  2) Segment detection: if we see "XHDR: ... -1" or Title/Artist look like a station slug/slogan,
-     we treat it as a non-music segment. We:
-        • Stop album-art lookups
-        • Clear current art
-        • Show "On-air segment" and station branding if available
+Author:     @sjhilt
+Project:    SDR-Boombox (Software Defined Radio Tuner)
+License:    MIT License
+Website:    https://github.com/sjhilt/SDR-Boombox
+Version:    1.0.0
+Python:     3.10+
+
+Description:
+------------
+SDR-Boombox is a modern GUI-driven radio tuner for Software Defined Radios
+such as the RTL-SDR. It attempts HD Radio decoding first using `nrsc5`, and
+automatically falls back to analog wideband FM when digital signals are not
+available. The interface features live metadata, album art, scanning, presets,
+and cross-platform support.
+
+Key Features:
+-------------
+• HD Radio decoding via nrsc5
+• Automatic analog FM fallback (rtl_fm)
+• Live metadata display (station, song info, slogans)
+• Real-time album art and station icons
+• Manual tuning + preset buttons (JSON saved)
+• Spectrum scan with automatic station detection
+• System tray integration with 📻 icon
+• Clean, retro-inspired "boombox" aesthetic
+
+Dependencies:
+-------------
+• nrsc5             – For HD Radio decoding
+• rtl_fm, rtl_power – From rtl-sdr (for analog FM + scan)
+• ffplay            – From FFmpeg (for audio playback)
+• Python PySide6    – For the graphical interface
+
+===============================================================
 """
 
 import os
