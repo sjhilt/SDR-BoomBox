@@ -1,46 +1,33 @@
 #!/usr/bin/env python3
 """
-boombox5: a boombox‑style Python GUI that wraps theori‑io/nrsc5
+sdr_boombox: QoL fixes for metadata display and "segment/no track" handling
 
-Requirements (install these first):
-  • Python 3.9+
-  • PySide6  (pip install PySide6)
-  • requests  (pip install requests)
-  • A working nrsc5 binary in PATH (see https://github.com/theori-io/nrsc5)
-  • FFmpeg (for ffplay) in PATH (https://ffmpeg.org)
-  • An RTL‑SDR (or use -r file capture) attached
-
-This app launches nrsc5 and streams its WAV audio to ffplay. The GUI
-looks like a retro boombox with big play/stop, a tuner dial, program buttons,
-VU meters, and a faux LCD. It also shows basic log/metadata lines.
-
-If the station doesn’t provide embedded AAS art, we do a background
-lookup for album art using the iTunes Search API based on artist/title.
-
-Notes:
-  • Audio is handled by ffplay reading from stdin so we don’t have to parse WAV.
-  • We forward stdout from nrsc5 -> stdin of ffplay on a background thread.
-  • On Windows, make sure libnrsc5.dll and nrsc5.exe are reachable; see README.
-  • On macOS/Linux, ensure permissions for your RTL-SDR and that ffplay exists.
+Changes vs boombox5:
+  1) Full-title display: removed pixel-width eliding. Titles/artists now wrap across lines.
+     Optional marquee for super-long lines (toggle MARQUEE=True).
+  2) Segment detection: if we see "XHDR: ... -1" or Title/Artist look like a station slug/slogan,
+     we treat it as a non-music segment. We:
+        • Stop album-art lookups
+        • Clear current art
+        • Show "On-air segment" and station branding if available
 """
 
 import os
 import sys
+import re
+import json
+import urllib.parse
 import threading
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
-
-import json
-import urllib.parse
 import requests
 
-APP_NAME = "boombox5"
+APP_NAME = "SDR-Boombox"
+MARQUEE = False  # set True to enable scrolling title when it exceeds N chars
 
-
-# ---------- Utility ----------
 
 def which(cmd: str) -> bool:
     return any(
@@ -57,11 +44,9 @@ class NRSC5Config:
     device_index: int | None = None
 
 
-# ---------- Worker that pipes nrsc5 -> ffplay ----------
-
 class RadioWorker(QtCore.QObject):
     started = QtCore.Signal()
-    stopped = QtCore.Signal(int)  # return code
+    stopped = QtCore.Signal(int)
     logLine = QtCore.Signal(str)
 
     def __init__(self, cfg: NRSC5Config, parent=None):
@@ -78,74 +63,52 @@ class RadioWorker(QtCore.QObject):
             cmd += ["-g", f"{self.cfg.gain}"]
         if self.cfg.device_index is not None:
             cmd += ["-d", str(self.cfg.device_index)]
-        # Output WAV to stdout:
         cmd += ["-o", "-", f"{self.cfg.frequency_mhz}", str(self.cfg.program)]
         return cmd
 
     def build_ffplay_cmd(self) -> list[str]:
-        # Read WAV from stdin, no UI window
-        return [
-            "ffplay", "-autoexit", "-nodisp", "-hide_banner", "-loglevel", "error", "-i", "-",
-        ]
+        return ["ffplay", "-autoexit", "-nodisp", "-hide_banner", "-loglevel", "error", "-i", "-"]
 
     @QtCore.Slot()
     def start(self):
-        self.stop()  # ensure clean
+        self.stop()
         self._stop_evt.clear()
         try:
             nrsc5_cmd = self.build_nrsc5_cmd()
             ffplay_cmd = self.build_ffplay_cmd()
 
-            # Spawn ffplay first (waiting for stdin)
             self._ffplay = subprocess.Popen(
-                ffplay_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                ffplay_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            # Spawn nrsc5 with stdout pipe and stderr for logs
             self._nrsc5 = subprocess.Popen(
-                nrsc5_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
+                nrsc5_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
             )
 
-            # Thread to forward audio
             def forward():
                 assert self._nrsc5 and self._ffplay
-                src = self._nrsc5.stdout
-                dst = self._ffplay.stdin
-                if not src or not dst:
-                    return
+                src = self._nrsc5.stdout; dst = self._ffplay.stdin
+                if not src or not dst: return
                 try:
                     while not self._stop_evt.is_set():
                         chunk = src.read(8192)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
-                        dst.flush()
+                        if not chunk: break
+                        dst.write(chunk); dst.flush()
                 except Exception:
                     pass
 
-            # Thread to read logs/metadata from stderr
             def read_logs():
                 assert self._nrsc5
                 err = self._nrsc5.stderr
-                if not err:
-                    return
+                if not err: return
                 for line in iter(err.readline, b""):
-                    if self._stop_evt.is_set():
-                        break
+                    if self._stop_evt.is_set(): break
                     try:
                         self.logLine.emit(line.decode("utf-8", errors="ignore").rstrip())
                     except Exception:
                         pass
 
-            self._forward_thread = threading.Thread(target=forward, daemon=True, name="audio-forward")
-            self._forward_thread.start()
-            threading.Thread(target=read_logs, daemon=True, name="stderr-reader").start()
-
+            self._forward_thread = threading.Thread(target=forward, daemon=True).start()
+            threading.Thread(target=read_logs, daemon=True).start()
             self.started.emit()
         except FileNotFoundError as e:
             self.logLine.emit(f"Executable not found: {e}")
@@ -154,22 +117,16 @@ class RadioWorker(QtCore.QObject):
     @QtCore.Slot()
     def stop(self):
         self._stop_evt.set()
-        # Terminate nrsc5 first so ffplay drains and exits
         if self._nrsc5 and self._nrsc5.poll() is None:
             self._nrsc5.terminate()
-            try:
-                self._nrsc5.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._nrsc5.kill()
+            try: self._nrsc5.wait(timeout=2)
+            except subprocess.TimeoutExpired: self._nrsc5.kill()
         self._nrsc5 = None
         if self._ffplay and self._ffplay.poll() is None:
             try:
-                # Closing stdin signals EOF -> exit
                 if self._ffplay.stdin:
-                    try:
-                        self._ffplay.stdin.close()
-                    except Exception:
-                        pass
+                    try: self._ffplay.stdin.close()
+                    except Exception: pass
                 self._ffplay.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self._ffplay.kill()
@@ -178,25 +135,34 @@ class RadioWorker(QtCore.QObject):
         self.stopped.emit(rc)
 
 
-# ---------- Main Window (boombox UI) ----------
-
 class BoomboxUI(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("boombox5 – HD Radio (NRSC‑5)")
-        self.setMinimumSize(980, 520)
+        self.setWindowTitle("SDR-Boombox – HD Radio (NRSC‑5)")
+        self.setMinimumSize(1000, 560)
         self.setStyleSheet(
             """
             QMainWindow { background: #151515; }
-            QLabel#lcd { font-family: 'DS-Digital', monospace; color: #7CFC00; background:#0a0a0a; padding: 12px 18px; border-radius: 10px; }
-            QFrame#boombox { border: 4px solid #333; border-radius: 24px; background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1e1e1e, stop:1 #111); }
+            QLabel#lcd {
+                font-family: 'DS-Digital', monospace;
+                color: #7CFC00; background:#0a0a0a;
+                padding: 14px 22px; border-radius: 14px; letter-spacing: 1px;
+            }
+            QFrame#boombox {
+                border: 4px solid #333; border-radius: 24px;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1e1e1e, stop:1 #111);
+            }
             QPushButton { background: #2a2a2a; color:#eee; border:1px solid #444; border-radius: 10px; padding:10px 14px; }
-            QPushButton:hover { background:#333; }
-            QPushButton:pressed { background:#222; }
+            QPushButton:hover { background:#333; } QPushButton:pressed { background:#222; }
             QSlider::groove:horizontal { height: 10px; background:#333; border-radius:5px; }
             QSlider::handle:horizontal { width: 18px; background:#777; border-radius:9px; margin:-4px 0; }
             QTextEdit { background:#0f0f0f; color:#ccc; border:1px solid #333; }
+
             QLabel#art { background:#0c0c0c; border:1px solid #2c2c2c; border-radius:12px; }
+
+            QFrame#metaCard { background: rgba(0,0,0,0.55); border: 1px solid #202020; border-radius: 12px; }
+            QLabel#metaTitle { color: #f2f2f2; font-size: 16px; font-weight: 600; }
+            QLabel#metaSubtitle { color: #b9b9b9; font-size: 13px; font-weight: 400; }
             """
         )
 
@@ -206,187 +172,218 @@ class BoomboxUI(QtWidgets.QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setHorizontalSpacing(18)
 
-        # Left/Right speakers (visual)
-        left_spk = self._speaker()
-        right_spk = self._speaker()
+        left_spk = self._speaker(); right_spk = self._speaker()
 
-        # Center stack: LCD + tuner + controls + logs
         center = QtWidgets.QVBoxLayout()
 
-        # LCD display
         self.lcd = QtWidgets.QLabel("—.—— MHz  P0  ⏸", objectName="lcd")
-        f = self.lcd.font()
-        f.setPointSize(26)
-        self.lcd.setFont(f)
+        f = self.lcd.font(); f.setPointSize(26); self.lcd.setFont(f)
         self.lcd.setAlignment(QtCore.Qt.AlignCenter)
         center.addWidget(self.lcd)
 
-        # Tuner dial (slider)
         freq_row = QtWidgets.QHBoxLayout()
         self.freq_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.freq_slider.setMinimum(880)   # 88.0 MHz
-        self.freq_slider.setMaximum(1080)  # 108.0 MHz
-        self.freq_slider.setValue(995)     # default 99.5
+        self.freq_slider.setRange(880, 1080); self.freq_slider.setValue(995)
         self.freq_slider.valueChanged.connect(self._update_lcd)
         freq_row.addWidget(QtWidgets.QLabel("88.0"))
         freq_row.addWidget(self.freq_slider, 1)
         freq_row.addWidget(QtWidgets.QLabel("108.0"))
         center.addLayout(freq_row)
 
-        # Program buttons 0..3
         prog_row = QtWidgets.QHBoxLayout()
         self.prog_group = QtWidgets.QButtonGroup(self)
         for i in range(4):
-            b = QtWidgets.QPushButton(f"Program {i}")
-            b.setCheckable(True)
-            if i == 0:
-                b.setChecked(True)
-            self.prog_group.addButton(b, i)
-            prog_row.addWidget(b)
+            b = QtWidgets.QPushButton(f"Program {i}"); b.setCheckable(True)
+            if i == 0: b.setChecked(True)
+            self.prog_group.addButton(b, i); prog_row.addWidget(b)
         center.addLayout(prog_row)
 
-        # Transport + volume
         ctrl_row = QtWidgets.QHBoxLayout()
         self.play_btn = QtWidgets.QPushButton("▶ Play")
         self.stop_btn = QtWidgets.QPushButton("■ Stop")
         self.scan_btn = QtWidgets.QPushButton("🔎 Quick Scan")
-        ctrl_row.addWidget(self.play_btn)
-        ctrl_row.addWidget(self.stop_btn)
-        ctrl_row.addWidget(self.scan_btn)
+        ctrl_row.addWidget(self.play_btn); ctrl_row.addWidget(self.stop_btn); ctrl_row.addWidget(self.scan_btn)
         ctrl_row.addStretch(1)
-        ctrl_row.addWidget(QtWidgets.QLabel("Volume"))
-        self.volume = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.volume.setRange(0, 100)
-        self.volume.setValue(80)
-        ctrl_row.addWidget(self.volume)
         center.addLayout(ctrl_row)
 
-        # Logs / metadata
-        self.log = QtWidgets.QTextEdit(readOnly=True)
-        self.log.setFixedHeight(140)
-        center.addWidget(self.log)
+        self.log = QtWidgets.QTextEdit(readOnly=True); self.log.setFixedHeight(160); center.addWidget(self.log)
 
-        # Right-side metadata/art panel
         side_panel = QtWidgets.QVBoxLayout()
         self.art = QtWidgets.QLabel(objectName="art")
-        self.art.setFixedSize(220, 220)
-        self.art.setAlignment(QtCore.Qt.AlignCenter)
-        self.art.setText("No Art")
+        self.art.setFixedSize(260, 260); self.art.setAlignment(QtCore.Qt.AlignCenter); self.art.setText("No Art")
         side_panel.addWidget(self.art)
-        self.meta_lbl = QtWidgets.QLabel("Title — Artist\nAlbum")
-        self.meta_lbl.setWordWrap(True)
-        side_panel.addWidget(self.meta_lbl)
+
+        self.meta_card = QtWidgets.QFrame(objectName="metaCard")
+        meta_layout = QtWidgets.QVBoxLayout(self.meta_card)
+        meta_layout.setContentsMargins(12, 10, 12, 10)
+        self.meta_title = QtWidgets.QLabel(" ", objectName="metaTitle")
+        self.meta_title.setWordWrap(True)
+        self.meta_sub = QtWidgets.QLabel(" ", objectName="metaSubtitle")
+        self.meta_sub.setWordWrap(True)
+        # optional marquee
+        self._marquee_timer = QtCore.QTimer(self); self._marquee_timer.setInterval(200); self._marquee_timer.timeout.connect(self._tick_marquee)
+        self._marquee_text = None
+        meta_layout.addWidget(self.meta_title); meta_layout.addWidget(self.meta_sub)
+        side_panel.addWidget(self.meta_card)
         side_panel.addStretch(1)
 
         layout.addWidget(left_spk, 0, 0, 3, 1)
         layout.addLayout(center, 0, 1, 3, 1)
         layout.addLayout(side_panel, 0, 2, 3, 1)
 
-        # State
         self.cfg = NRSC5Config()
         self.worker = RadioWorker(self.cfg)
-        self.thread = QtCore.QThread(self)
-        self.worker.moveToThread(self.thread)
-        self.thread.start()
+        self.thread = QtCore.QThread(self); self.worker.moveToThread(self.thread); self.thread.start()
 
-        # Album-art fetch timer (debounced)
-        self._artist = None
-        self._title = None
-        self._album = None
+        self._artist = None; self._title = None; self._album = None
+        self._station = None; self._slogan = None
+        self._is_segment = False
         self._art_cache: dict[str, QtGui.QPixmap] = {}
-        self._art_timer = QtCore.QTimer(self)
-        self._art_timer.setInterval(600)  # debounce
-        self._art_timer.setSingleShot(True)
+        self._art_timer = QtCore.QTimer(self); self._art_timer.setInterval(600); self._art_timer.setSingleShot(True)
         self._art_timer.timeout.connect(self._fetch_album_art)
 
-        # Wire up
         self.play_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self._stop)
         self.scan_btn.clicked.connect(self._scan)
-        # Important: connect to a slot we implement
         self.prog_group.idToggled.connect(self._prog_changed)
-        self.volume.valueChanged.connect(self._set_volume)
         self.worker.logLine.connect(self._handle_log_line)
         self.worker.started.connect(lambda: self._append_log("[audio] started"))
         self.worker.stopped.connect(lambda rc: self._append_log(f"[audio] stopped rc={rc}"))
 
         self._update_lcd()
 
-        # Basic sanity checks
-        if not which("nrsc5"):
-            self._append_log("WARNING: nrsc5 was not found in PATH.")
-        if not which("ffplay"):
-            self._append_log("WARNING: ffplay (FFmpeg) was not found in PATH.")
+        if not which("nrsc5"): self._append_log("WARNING: nrsc5 was not found in PATH.")
+        if not which("ffplay"): self._append_log("WARNING: ffplay (FFmpeg) was not found in PATH.")
 
-    # --- UI helpers ---
     def _speaker(self) -> QtWidgets.QFrame:
-        f = QtWidgets.QFrame()
-        v = QtWidgets.QVBoxLayout(f)
-        grill = QtWidgets.QLabel()
-        pm = QtGui.QPixmap(300, 300)
-        pm.fill(QtGui.QColor("#1b1b1b"))
-        painter = QtGui.QPainter(pm)
-        pen = QtGui.QPen(QtGui.QColor("#2a2a2a"))
-        painter.setPen(pen)
-        for y in range(10, 300, 18):
-            for x in range(10, 300, 18):
+        f = QtWidgets.QFrame(); v = QtWidgets.QVBoxLayout(f)
+        grill = QtWidgets.QLabel(); pm = QtGui.QPixmap(320, 320); pm.fill(QtGui.QColor("#1b1b1b"))
+        painter = QtGui.QPainter(pm); pen = QtGui.QPen(QtGui.QColor("#2a2a2a")); painter.setPen(pen)
+        for y in range(10, 320, 18):
+            for x in range(10, 320, 18):
                 painter.drawEllipse(QtCore.QPoint(x, y), 3, 3)
-        painter.end()
-        grill.setPixmap(pm)
-        v.addWidget(grill)
-        return f
+        painter.end(); grill.setPixmap(pm); v.addWidget(grill); return f
 
-    def _mhz(self) -> float:
-        return round(self.freq_slider.value() / 10.0, 1)
+    def _mhz(self) -> float: return round(self.freq_slider.value() / 10.0, 1)
 
     def _update_lcd(self):
         prog = self.prog_group.checkedId() if self.prog_group.checkedId() >= 0 else 0
         self.lcd.setText(f"{self._mhz():.1f} MHz  P{prog}  {'▶' if self.play_btn.isDown() else '⏸'}")
 
-    def _append_log(self, s: str):
-        self.log.append(s)
+    def _append_log(self, s: str): self.log.append(s)
+
+    # --- Regexes ---
+    _ts_re = re.compile(r"^\s*\d{2}:\d{2}:\d{2}\s+")
+    _title_re = re.compile(r"\bTitle:\s*(.+)", re.IGNORECASE)
+    _artist_re = re.compile(r"\bArtist:\s*(.+)", re.IGNORECASE)
+    _album_re = re.compile(r"\bAlbum:\s*(.+)", re.IGNORECASE)
+    _slogan_re = re.compile(r"\bSlogan:\s*(.+)", re.IGNORECASE)
+    _station_re = re.compile(r"\bStation name:\s*(.+)", re.IGNORECASE)
+    _xhdr_re = re.compile(r"\bXHDR:\s*\d+\s+[0-9A-Fa-f]+\s+(-?\d+)\b")
 
     def _handle_log_line(self, s: str):
-        """Parse simple PAD-like lines from nrsc5 stderr and trigger art lookup.
-        Typical lines include: "Title: ...", "Artist: ..." or combined messages.
-        This is heuristic — for best results use the nrsc5 Python API later.
-        """
         self._append_log(s)
-        lower = s.lower()
+        line = self._ts_re.sub("", s).strip()
+
+        # XHDR segment detection
+        m = self._xhdr_re.search(line)
+        if m:
+            last = m.group(1).strip()
+            self._is_segment = (last == "-1")
+            if self._is_segment:
+                # Clear metadata/art and show segment indicator
+                self._append_log("[meta] detected on-air segment (no track id)")
+                self._title = None; self._artist = None; self._album = None
+                self._set_meta_labels(segment=True)
+                self._clear_art()
+                return  # skip further parsing on this line
+
         updated = False
-        if lower.startswith("title:"):
-            self._title = s.split(":", 1)[1].strip() or None
+        m = self._title_re.search(line)
+        if m:
+            self._title = m.group(1).strip()
             updated = True
-        elif lower.startswith("artist:"):
-            self._artist = s.split(":", 1)[1].strip() or None
+        m = self._artist_re.search(line)
+        if m:
+            self._artist = m.group(1).strip()
             updated = True
-        elif lower.startswith("album:"):
-            self._album = s.split(":", 1)[1].strip() or None
+        m = self._album_re.search(line)
+        if m:
+            self._album = m.group(1).strip()
             updated = True
-        elif "title" in lower and "artist" in lower and ":" in s:
-            # crude combined line parser
-            try:
-                parts = [p.strip() for p in s.split("|")]
-                for p in parts:
-                    if p.lower().startswith("title:"):
-                        self._title = p.split(":", 1)[1].strip()
-                    if p.lower().startswith("artist:"):
-                        self._artist = p.split(":", 1)[1].strip()
-                    if p.lower().startswith("album:"):
-                        self._album = p.split(":", 1)[1].strip()
-                updated = True
-            except Exception:
-                pass
+
+        m = self._station_re.search(line)
+        if m:
+            self._station = m.group(1).strip()
+            self.lcd.setText(f"{self._mhz():.1f} MHz  P{self.prog_group.checkedId() if self.prog_group.checkedId()>=0 else 0}  {self._station}")
+        m = self._slogan_re.search(line)
+        if m:
+            self._slogan = m.group(1).strip()
+            self.lcd.setText(f"{self._mhz():.1f} MHz  P{self.prog_group.checkedId() if self.prog_group.checkedId()>=0 else 0}  {self._slogan}")
+
+        # Heuristic: if title/artist equal station branding, treat as segment
+        branding = {x for x in [self._station, self._slogan] if x}
+        if updated and branding:
+            title_lower = (self._title or "").lower()
+            artist_lower = (self._artist or "").lower()
+            looks_like_brand = any(b.lower() in title_lower or b.lower() in artist_lower for b in branding)
+            if looks_like_brand:
+                self._is_segment = True
+
         if updated:
-            self.meta_lbl.setText(f"{self._title or ''} — {self._artist or ''}\n{self._album or ''}")
-            self._art_timer.start()
+            self._set_meta_labels(segment=self._is_segment)
+            if not self._is_segment:
+                self._art_timer.start()
+            else:
+                self._clear_art()
 
-    def _set_volume(self, val: int):
-        # Let ffplay manage system volume: we cannot control its volume over stdin here.
-        # (Extend by launching ffplay with -af volume and restarting, or use python-vlc.)
-        pass
+    def _set_meta_labels(self, segment: bool = False):
+        if segment:
+            # Prefer slogan or station name for display
+            line1 = self._slogan or self._station or "On-air segment"
+            line2 = ""  # no album for segments
+            self.meta_title.setText(line1)
+            self.meta_sub.setText(line2)
+            self._stop_marquee()
+            return
 
-    # --- Actions ---
+        title = (self._title or "").strip()
+        artist = (self._artist or "").strip()
+        album = (self._album or "").strip()
+
+        title_line = f"{title} — {artist}".strip(" —")
+        self.meta_title.setText(title_line if title_line else " ")
+        self.meta_sub.setText(album if album else " ")
+
+        # Word wrap already enabled; optionally marquee very long lines
+        if MARQUEE and len(title_line) > 48:
+            self._start_marquee(title_line)
+        else:
+            self._stop_marquee()
+
+    def _start_marquee(self, text: str):
+        self._marquee_text = text + "   "
+        if not self._marquee_timer.isActive():
+            self._marquee_timer.start()
+
+    def _stop_marquee(self):
+        if self._marquee_timer.isActive():
+            self._marquee_timer.stop()
+        self._marquee_text = None
+
+    def _tick_marquee(self):
+        if not self._marquee_text:
+            return
+        self._marquee_text = self._marquee_text[1:] + self._marquee_text[0]
+        self.meta_title.setText(self._marquee_text)
+
+    def _clear_art(self):
+        self._art_timer.stop()
+        self.art.setPixmap(QtGui.QPixmap())  # clear
+        self.art.setText("No Art")
+
+    def _set_volume(self, val: int): pass  # ffplay controls output
+
     def _start(self):
         self.cfg.frequency_mhz = self._mhz()
         self.cfg.program = self.prog_group.checkedId() if self.prog_group.checkedId() >= 0 else 0
@@ -398,108 +395,77 @@ class BoomboxUI(QtWidgets.QMainWindow):
         self._update_lcd()
 
     def _scan(self):
-        # Very simple scan: step 0.2 MHz across the band and log carriers that lock quickly
         self._append_log("[scan] starting quick scan (very basic)")
-
         def do_scan():
-            orig_freq = self._mhz()
-            step = 0.2
-            found = []
+            orig = self._mhz(); step = 0.2; found = []
             for i in range(880, 1081, int(step * 10)):
-                if self.worker._nrsc5:  # stop if playing
-                    break
+                if self.worker._nrsc5: break
                 f = i / 10.0
                 try:
-                    p = subprocess.Popen(["nrsc5", "-q", "-o", "-", f"{f}", "0"],
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    p = subprocess.Popen(["nrsc5", "-q", "-o", "-", f"{f}", "0"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     try:
                         out, err = p.communicate(timeout=2.5)
                     except subprocess.TimeoutExpired:
-                        p.kill()
-                        out, err = p.communicate()
+                        p.kill(); out, err = p.communicate()
                     if b"Program 0" in err or b"Audio" in err or b"Acquiring" in err:
-                        found.append(f)
-                        self.worker.logLine.emit(f"[scan] possible HD at {f:.1f} MHz")
-                except Exception:
-                    pass
-            self.worker.logLine.emit("[scan] done: " + ", ".join(f"{x:.1f}" for x in found) if found else "none")
-            self.freq_slider.setValue(int(orig_freq * 10))
-
+                        found.append(f); self.worker.logLine.emit(f"[scan] possible HD at {f:.1f} MHz")
+                except Exception: pass
+            self.worker.logLine.emit("[scan] done: " + (", ".join(f"{x:.1f}" for x in found) if found else "none"))
+            self.freq_slider.setValue(int(orig * 10))
         threading.Thread(target=do_scan, daemon=True, name="quick-scan").start()
 
-    # --- Program button toggles ---
     @QtCore.Slot(int, bool)
     def _prog_changed(self, id: int, checked: bool):
-        """Update the selected HD subchannel (program 0–3) when a button toggles."""
-        if not checked:
-            return
-        self.cfg.program = id
-        self._update_lcd()
-        # Optional: auto-retune if already playing.
-        # if self.worker and self.worker._nrsc5:
-        #     self._stop()
-        #     self._start()
+        if not checked: return
+        self.cfg.program = id; self._update_lcd()
 
-    # --- Album art lookup ---
     def _fetch_album_art(self):
-        if not self._artist and not self._title:
+        # Guard: don't fetch during segments
+        if self._is_segment: return
+        if not getattr(self, "_artist", None) and not getattr(self, "_title", None):
             return
         key = json.dumps({"a": self._artist, "t": self._title, "al": self._album})
         if key in self._art_cache:
             self.art.setPixmap(self._art_cache[key].scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
             return
-        threading.Thread(target=self._fetch_art_worker, args=(key, self._artist, self._title, self._album), daemon=True, name="art-fetch").start()
+        threading.Thread(target=self._fetch_art_worker, args=(key, self._artist, self._title, self._album), daemon=True).start()
 
     def _fetch_art_worker(self, key: str, artist: str | None, title: str | None, album: str | None):
         try:
-            # iTunes Search API: no auth needed. Prefer album name; fallback to artist+title.
-            q = album or f"{artist or ''} {title or ''}".strip()
-            if not q:
-                return
-            url = "https://itunes.apple.com/search?" + urllib.parse.urlencode({
-                "term": q,
-                "media": "music",
-                "limit": 1,
-            })
+            q = (album or f"{artist or ''} {title or ''}".strip())
+            if not q: return
+            url = "https://itunes.apple.com/search?" + urllib.parse.urlencode({"term": q, "media": "music", "limit": 1})
             r = requests.get(url, timeout=5)
             if r.ok:
                 js = r.json()
                 if js.get("resultCount", 0) > 0:
                     art_url = js["results"][0].get("artworkUrl100") or js["results"][0].get("artworkUrl60")
                     if art_url:
-                        # request a larger image by swapping size, many iTunes URLs support 600x or 1200x
                         art_url = art_url.replace("100x100bb", "600x600bb").replace("60x60bb", "600x600bb")
                         img = requests.get(art_url, timeout=5)
                         if img.ok:
-                            pm = QtGui.QPixmap()
-                            pm.loadFromData(img.content)
+                            pm = QtGui.QPixmap(); pm.loadFromData(img.content)
                             if not pm.isNull():
                                 self._art_cache[key] = pm
                                 self.art.setPixmap(pm.scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
                                 return
         except Exception as e:
             self._append_log(f"[art] lookup failed: {e}")
-        # fallback UI
-        self.art.setText("No Art")
+        # if search failed, keep prior art; do not set "No Art" unless empty
 
-    # --- Ensure clean shutdown ---
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         try:
             self._stop()
             if self.thread and self.thread.isRunning():
-                self.thread.quit()
-                self.thread.wait(2000)
+                self.thread.quit(); self.thread.wait(2000)
         except Exception:
             pass
         super().closeEvent(event)
 
 
-# ---------- Run ----------
-
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    w = BoomboxUI()
-    w.show()
+    w = BoomboxUI(); w.show()
     sys.exit(app.exec())
 
 
