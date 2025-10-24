@@ -30,10 +30,19 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
 from PySide6 import QtCore, QtGui, QtWidgets
+import random
+try:
+    import pyaudio
+    import numpy as np
+    AUDIO_CAPTURE_AVAILABLE = True
+except ImportError:
+    AUDIO_CAPTURE_AVAILABLE = False
+    print("Warning: PyAudio or NumPy not installed. Audio-reactive visualization disabled.")
 
 APP_NAME = "SDR-Boombox"
 FALLBACK_TIMEOUT_S = 6.0
 PRESETS_PATH = Path.home() / ".sdr_boombox_presets.json"
+SETTINGS_PATH = Path.home() / ".sdr_boombox_settings.json"
 
 def which(cmd: str) -> str | None:
     p = shutil.which(cmd)
@@ -55,6 +64,258 @@ def emoji_pixmap(emoji: str, size: int = 256) -> QtGui.QPixmap:
     painter.drawText(pm.rect(), QtCore.Qt.AlignCenter, emoji)
     painter.end()
     return pm
+
+
+class VisualizerWidget(QtWidgets.QWidget):
+    """Winamp-style spectrum analyzer visualization with real audio reactivity"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(260, 260)
+        
+        # Visualization parameters
+        self.num_bars = 20
+        self.bar_heights = [0.0] * self.num_bars
+        self.target_heights = [0.0] * self.num_bars
+        self.peak_heights = [0.0] * self.num_bars
+        self.peak_hold = [0] * self.num_bars
+        
+        # Colors for gradient effect (classic Winamp green-yellow-red)
+        self.gradient_colors = [
+            QtGui.QColor(0, 255, 0),    # Green
+            QtGui.QColor(128, 255, 0),  # Yellow-green
+            QtGui.QColor(255, 255, 0),   # Yellow
+            QtGui.QColor(255, 128, 0),   # Orange
+            QtGui.QColor(255, 0, 0),     # Red
+        ]
+        
+        # Audio capture setup
+        self.audio_stream = None
+        self.audio_thread = None
+        self.audio_running = False
+        self.frequency_data = [0.0] * self.num_bars
+        
+        if AUDIO_CAPTURE_AVAILABLE:
+            try:
+                self.p = pyaudio.PyAudio()
+                # Try to find loopback device (for capturing system audio)
+                self.audio_device_index = self._find_loopback_device()
+            except Exception as e:
+                print(f"Audio capture initialization failed: {e}")
+                self.p = None
+        else:
+            self.p = None
+        
+        # Animation timer
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_visualization)
+        self.timer.start(50)  # 20 FPS
+        
+        # Background
+        self.setStyleSheet("background: #000000; border: 1px solid #1a1a1a; border-radius: 12px;")
+        
+        self.is_playing = False
+    
+    def _find_loopback_device(self):
+        """Try to find a loopback audio device for capturing system audio"""
+        if not self.p:
+            return None
+            
+        # Look for loopback devices (varies by OS)
+        for i in range(self.p.get_device_count()):
+            info = self.p.get_device_info_by_index(i)
+            name = info.get('name', '').lower()
+            
+            # Common loopback device names
+            if any(keyword in name for keyword in ['loopback', 'stereo mix', 'what u hear', 'wave out', 'monitor']):
+                if info['maxInputChannels'] > 0:
+                    return i
+        
+        # If no loopback found, try default input (might capture from mic)
+        try:
+            return self.p.get_default_input_device_info()['index']
+        except:
+            return None
+    
+    def _audio_capture_thread(self):
+        """Thread function to capture and analyze audio"""
+        if not self.p or self.audio_device_index is None:
+            return
+            
+        try:
+            # Open audio stream
+            self.audio_stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=44100,
+                input=True,
+                input_device_index=self.audio_device_index,
+                frames_per_buffer=2048
+            )
+            
+            while self.audio_running:
+                try:
+                    # Read audio data
+                    data = self.audio_stream.read(2048, exception_on_overflow=False)
+                    
+                    # Convert to numpy array
+                    audio_data = np.frombuffer(data, dtype=np.int16)
+                    
+                    # Apply window function to reduce spectral leakage
+                    window = np.hanning(len(audio_data))
+                    audio_data = audio_data * window
+                    
+                    # Perform FFT
+                    fft_data = np.abs(np.fft.rfft(audio_data))
+                    
+                    # Get frequency bins for our bars
+                    freq_bins = len(fft_data) // self.num_bars
+                    
+                    for i in range(self.num_bars):
+                        start = i * freq_bins
+                        end = start + freq_bins
+                        
+                        # Average the FFT values for this bar's frequency range
+                        if end <= len(fft_data):
+                            avg = np.mean(fft_data[start:end])
+                            # Normalize and apply logarithmic scaling for better visualization
+                            normalized = np.log10(avg + 1) / 10.0  # Avoid log(0)
+                            self.frequency_data[i] = min(1.0, normalized * 2.0)  # Scale and cap at 1.0
+                        
+                except Exception as e:
+                    # Continue on audio errors (buffer overflow, etc.)
+                    pass
+                    
+        except Exception as e:
+            print(f"Audio capture error: {e}")
+        finally:
+            if self.audio_stream:
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+                self.audio_stream = None
+        
+    def set_playing(self, playing: bool):
+        """Set whether audio is playing to animate the visualization"""
+        self.is_playing = playing
+        
+        if AUDIO_CAPTURE_AVAILABLE and self.p:
+            if playing and not self.audio_running:
+                # Start audio capture thread
+                self.audio_running = True
+                self.audio_thread = threading.Thread(target=self._audio_capture_thread, daemon=True)
+                self.audio_thread.start()
+            elif not playing and self.audio_running:
+                # Stop audio capture
+                self.audio_running = False
+                if self.audio_thread:
+                    self.audio_thread.join(timeout=1.0)
+                    self.audio_thread = None
+        
+    def update_visualization(self):
+        """Update the visualization bars"""
+        if self.is_playing:
+            if AUDIO_CAPTURE_AVAILABLE and self.p and self.audio_running:
+                # Use real audio data if available
+                for i in range(self.num_bars):
+                    # Apply some smoothing and enhancement
+                    self.target_heights[i] = self.frequency_data[i] * 1.2  # Boost for visibility
+            else:
+                # Fallback to simulated visualization if audio capture not available
+                for i in range(self.num_bars):
+                    # Create a frequency response curve (higher in bass/mid, lower in treble)
+                    freq_factor = 1.0 - (i / self.num_bars) * 0.5
+                    base_height = random.uniform(0.2, 1.0) * freq_factor
+                    
+                    # Add some rhythm simulation (occasional beats)
+                    if random.random() < 0.15:  # 15% chance of a "beat"
+                        base_height = min(1.0, base_height + random.uniform(0.3, 0.5))
+                    
+                    self.target_heights[i] = base_height
+        else:
+            # Gradually decrease to zero when not playing
+            self.target_heights = [0.0] * self.num_bars
+        
+        # Smooth animation towards target heights
+        for i in range(self.num_bars):
+            diff = self.target_heights[i] - self.bar_heights[i]
+            self.bar_heights[i] += diff * 0.3  # Smoothing factor
+            
+            # Update peaks
+            if self.bar_heights[i] > self.peak_heights[i]:
+                self.peak_heights[i] = self.bar_heights[i]
+                self.peak_hold[i] = 20  # Hold peak for 20 frames
+            elif self.peak_hold[i] > 0:
+                self.peak_hold[i] -= 1
+            else:
+                # Peak falls slowly
+                self.peak_heights[i] *= 0.95
+        
+        self.update()
+    
+    def paintEvent(self, event):
+        """Paint the spectrum analyzer"""
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        
+        # Draw background
+        painter.fillRect(self.rect(), QtGui.QColor(0, 0, 0))
+        
+        # Calculate bar dimensions
+        width = self.width()
+        height = self.height()
+        bar_width = (width - 40) / self.num_bars  # Leave margins
+        bar_spacing = bar_width * 0.2
+        actual_bar_width = bar_width - bar_spacing
+        
+        # Draw title
+        painter.setPen(QtGui.QColor(100, 255, 100))
+        font = QtGui.QFont("Arial", 10)
+        painter.setFont(font)
+        painter.drawText(QtCore.QRect(0, 5, width, 20), 
+                        QtCore.Qt.AlignCenter, "♪ SPECTRUM ANALYZER ♪")
+        
+        # Draw bars
+        for i in range(self.num_bars):
+            x = 20 + i * bar_width
+            bar_height = self.bar_heights[i] * (height - 60)
+            y = height - bar_height - 20
+            
+            if bar_height > 0:
+                # Create gradient for the bar
+                gradient = QtGui.QLinearGradient(x, y + bar_height, x, y)
+                
+                # Color based on height
+                for j, color in enumerate(self.gradient_colors):
+                    position = j / (len(self.gradient_colors) - 1)
+                    gradient.setColorAt(position, color)
+                
+                painter.fillRect(QtCore.QRectF(x, y, actual_bar_width, bar_height), gradient)
+                
+                # Draw peak indicator
+                if self.peak_heights[i] > 0:
+                    peak_y = height - (self.peak_heights[i] * (height - 60)) - 20
+                    painter.fillRect(QtCore.QRectF(x, peak_y - 2, actual_bar_width, 3),
+                                   QtGui.QColor(255, 255, 255))
+        
+        # Draw reflection effect (dimmer bars below)
+        painter.setOpacity(0.2)
+        for i in range(self.num_bars):
+            x = 20 + i * bar_width
+            bar_height = self.bar_heights[i] * (height - 60) * 0.3  # Smaller reflection
+            y = height - 20
+            
+            if bar_height > 0:
+                gradient = QtGui.QLinearGradient(x, y, x, y + bar_height)
+                gradient.setColorAt(0, QtGui.QColor(0, 100, 0))
+                gradient.setColorAt(1, QtGui.QColor(0, 0, 0))
+                painter.fillRect(QtCore.QRectF(x, y, actual_bar_width, bar_height), gradient)
+    
+    def closeEvent(self, event):
+        """Clean up audio resources when closing"""
+        self.set_playing(False)
+        if self.p:
+            self.p.terminate()
+        super().closeEvent(event)
 
 @dataclass
 class Cfg:
@@ -224,7 +485,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SDR-Boombox – HD Radio (NRSC-5)")
-        self.setMinimumSize(1020, 580)
+        # Initial size will be adjusted based on log visibility in _load_settings
+        self.setMinimumSize(1020, 350)
         self.setStyleSheet("""
             QMainWindow { background: #151515; }
             QLabel#lcd {
@@ -298,7 +560,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         row2.addWidget(self.btn_play); row2.addWidget(self.btn_stop); row2.addWidget(self.chk_fallback)
         left.addLayout(row2)
         
-        # HD program selector (HD1, HD2, etc.)
+        # HD program selector (HD1, HD2, etc.) and log toggle
         hd_row = QtWidgets.QHBoxLayout()
         hd_label = QtWidgets.QLabel("HD Channel:")
         hd_label.setStyleSheet("color: #eee;")
@@ -306,22 +568,47 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.hd_selector.addItems(["HD1", "HD2", "HD3", "HD4"])
         self.hd_selector.setCurrentIndex(0)
         self.hd_selector.currentIndexChanged.connect(self._on_hd_program_changed)
+        
+        # Add log toggle button
+        self.btn_toggle_log = QtWidgets.QPushButton("Log")
+        self.btn_toggle_log.setCheckable(True)
+        self.btn_toggle_log.setMaximumWidth(80)
+        self.btn_toggle_log.clicked.connect(self._toggle_log_view)
+        
         hd_row.addWidget(hd_label)
         hd_row.addWidget(self.hd_selector)
         hd_row.addStretch()
+        hd_row.addWidget(self.btn_toggle_log)
         left.addLayout(hd_row)
 
-        # log
-        self.log = QtWidgets.QTextEdit(readOnly=True); self.log.setFixedHeight(230)
+        # log (initially hidden based on saved preference)
+        self.log = QtWidgets.QTextEdit(readOnly=True)
+        self.log.setFixedHeight(230)
         left.addWidget(self.log, 1)
 
         grid.addLayout(left, 1, 0)
 
         # right: art + metadata
         right = QtWidgets.QVBoxLayout()
-        self.art = QtWidgets.QLabel(objectName="art"); self.art.setFixedSize(260,260)
-        self.art.setAlignment(QtCore.Qt.AlignCenter); self.art.setPixmap(emoji_pixmap("📻", 220))
-        right.addWidget(self.art)
+        
+        # Create a stacked widget to switch between album art and visualizer
+        self.art_stack = QtWidgets.QStackedWidget()
+        self.art_stack.setFixedSize(260, 260)
+        
+        # Album art label
+        self.art = QtWidgets.QLabel(objectName="art")
+        self.art.setFixedSize(260, 260)
+        self.art.setAlignment(QtCore.Qt.AlignCenter)
+        self.art.setPixmap(emoji_pixmap("📻", 220))
+        
+        # Visualizer widget
+        self.visualizer = VisualizerWidget()
+        
+        # Add both to the stack
+        self.art_stack.addWidget(self.art)
+        self.art_stack.addWidget(self.visualizer)
+        
+        right.addWidget(self.art_stack)
 
         self.meta_card = QtWidgets.QFrame(objectName="metaCard")
         meta_layout = QtWidgets.QVBoxLayout(self.meta_card); meta_layout.setContentsMargins(12,10,12,10)
@@ -345,6 +632,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
         # runtime objects
         self._load_presets()
+        self._load_settings()  # Load settings including log visibility
         self.worker = Worker(self.cfg)
         self.thread = QtCore.QThread(self); self.worker.moveToThread(self.thread); self.thread.start()
 
@@ -359,6 +647,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._last_album = ""
         self._has_song_meta = False
         self._current_art_key = ""   # to avoid flicker
+        self._has_album_art = False  # Track if we have real album art
         self._meta_debounce = QtCore.QTimer(self); self._meta_debounce.setSingleShot(True)
         self._meta_debounce.setInterval(350)  # ms
         self._meta_debounce.timeout.connect(self._maybe_fetch_art)
@@ -379,7 +668,54 @@ class SDRBoombox(QtWidgets.QMainWindow):
         if not which("ffplay"): self._append_log("WARNING: ffplay not found in PATH.")
         if not which("rtl_fm"): self._append_log("Note: rtl_fm not found; analog FM fallback unavailable.")
 
-    # ----- presets -----
+    # ----- settings & presets -----
+    def _load_settings(self):
+        """Load application settings"""
+        self.settings = {"show_log": True}  # Default settings
+        if SETTINGS_PATH.exists():
+            try:
+                saved_settings = json.loads(SETTINGS_PATH.read_text())
+                self.settings.update(saved_settings)
+            except Exception:
+                pass
+        
+        # Apply settings
+        show_log = self.settings.get("show_log", True)
+        self.log.setVisible(show_log)
+        self.btn_toggle_log.setChecked(show_log)
+        
+        # Adjust window size based on log visibility
+        if not show_log:
+            # Make window smaller when log is hidden
+            self.setMinimumSize(1020, 350)
+            if self.height() > 400:
+                self.resize(self.width(), 400)
+    
+    def _save_settings(self):
+        """Save application settings"""
+        try:
+            SETTINGS_PATH.write_text(json.dumps(self.settings, indent=2))
+        except Exception:
+            pass
+    
+    def _toggle_log_view(self):
+        """Toggle the visibility of the log view"""
+        show_log = self.btn_toggle_log.isChecked()
+        self.log.setVisible(show_log)
+        
+        # Save preference
+        self.settings["show_log"] = show_log
+        self._save_settings()
+        
+        # Adjust window minimum size
+        if show_log:
+            self.setMinimumSize(1020, 580)
+        else:
+            self.setMinimumSize(1020, 350)
+            # Optionally resize window to be smaller
+            if self.height() > 400:
+                self.resize(self.width(), 400)
+    
     def _load_presets(self):
         self.presets: dict[str,float] = {}
         if PRESETS_PATH.exists():
@@ -455,7 +791,13 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._play_clicked()
 
     def _append_log(self, s: str):
-        self.log.append(s)
+        # Only append to log if it exists and is visible
+        if hasattr(self, 'log'):
+            self.log.append(s)
+            # If log is hidden but we're getting important messages, show indicator
+            if not self.log.isVisible() and any(keyword in s.lower() for keyword in ["error", "warning", "fail"]):
+                # Update button text to show there's something important
+                self.btn_toggle_log.setText(" Log ⚠")
 
     # ----- playback buttons -----
     def _play_clicked(self):
@@ -473,7 +815,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # Reset UI displays
         self.meta_title.setText(f"{self._mhz():.1f} MHz")
         self.meta_sub.setText("Tuning...")
-        self.art.setPixmap(emoji_pixmap("📻", 220))
+        # Start with visualizer while tuning
+        self.art_stack.setCurrentWidget(self.visualizer)
+        self._has_album_art = False
         
         self.btn_play.setEnabled(False)
         QtCore.QMetaObject.invokeMethod(self.worker, "start_hd")
@@ -493,11 +837,15 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _on_started(self, mode: str):
         self._append_log(f"[audio] started ({mode})")
         self.lcd.setText(self.lcd.text().replace("⏸", "▶", 1))
+        # Start visualizer animation
+        self.visualizer.set_playing(True)
 
     def _on_stopped(self, rc: int, mode: str):
         self._append_log(f"[audio] stopped rc={rc} ({mode})")
         self.lcd.setText(self.lcd.text().replace("▶", "⏸", 1))
         self.btn_play.setEnabled(True)
+        # Stop visualizer animation
+        self.visualizer.set_playing(False)
 
     def _on_hd_synced(self):
         self._hd_synced = True
@@ -599,6 +947,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
         def job():
             pm = QtGui.QPixmap()
+            found_art = False
+            
             # Try to fetch track art via iTunes public API when we have artist+title.
             if artist and title:
                 try:
@@ -614,14 +964,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
                         with urlopen(Request(url, headers={"User-Agent": "SDR-Boombox"}), timeout=5) as r2:
                             raw = r2.read()
                         pm.loadFromData(raw)
+                        found_art = not pm.isNull()
                 except Exception:
                     pass
 
-            # If we still have no art, fallback to 📻 emoji
-            if pm.isNull():
-                pm = emoji_pixmap("📻", 220)
-
-            self.artReady.emit(pm)
+            # Store whether we found real album art
+            self._has_album_art = found_art
+            
+            # If we have art, emit it; otherwise the visualizer will be shown
+            if found_art:
+                self.artReady.emit(pm)
+            else:
+                # Switch to visualizer instead of showing emoji
+                QtCore.QMetaObject.invokeMethod(self, "_show_visualizer", QtCore.Qt.QueuedConnection)
 
         threading.Thread(target=job, daemon=True).start()
 
@@ -629,6 +984,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _set_album_art(self, pm: QtGui.QPixmap):
         if pm and not pm.isNull():
             self.art.setPixmap(pm.scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            # Switch to album art view
+            self.art_stack.setCurrentWidget(self.art)
+    
+    @QtCore.Slot()
+    def _show_visualizer(self):
+        """Switch to visualizer when no album art is available"""
+        # Switch to visualizer view
+        self.art_stack.setCurrentWidget(self.visualizer)
 
     # ----- lifecycle -----
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
