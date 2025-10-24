@@ -11,7 +11,8 @@ A modern GUI-driven HD Radio (NRSC-5) and analog FM receiver for Software Define
 ## Features
 
 ### Core Radio Functionality
-- **HD Radio (NRSC-5) Reception**: Decode and play digital HD Radio broadcasts (HD1/Program 0)
+- **HD Radio (NRSC-5) Reception**: Decode and play digital HD Radio broadcasts with HD1/HD2/HD3/HD4 channel selection
+- **HD Channel Selection**: Toggle between different HD subchannels (HD1, HD2, HD3, HD4) for stations that broadcast multiple programs
 - **Automatic Analog Fallback**: Seamlessly switches to wideband FM when HD signal is unavailable (6-second timeout)
 - **Frequency Range**: 88.0 - 108.0 MHz with 0.1 MHz precision tuning
 
@@ -110,12 +111,13 @@ Required package:
 
 3. **Start playback**:
    - Click the "▶ Play" button
-   - The app will attempt HD Radio first (HD1/Program 0), then fall back to analog FM if needed
+   - The app will attempt HD Radio first, then fall back to analog FM if needed
+   - Select HD channel (HD1-HD4) using the dropdown menu to access different programs on the same frequency
 
 ### Preset Management
 
-- **Save a preset**: Right-click on any P0-P3 button and select "Save current frequency"
-- **Load a preset**: Left-click on a preset button
+- **Save a preset**: Right-click on any P0-P3 button and select "Save current frequency" (includes HD channel selection)
+- **Load a preset**: Left-click on a preset button (restores both frequency and HD channel)
 - **Clear a preset**: Right-click and select "Clear preset"
 
 ### System Tray
@@ -137,6 +139,7 @@ class Cfg:
     device_index: int | None = None  # Auto-select device
     volume: float = 1.0        # Audio volume
     ppm: int = 5               # Frequency correction
+    hd_program: int = 0        # HD channel (0=HD1, 1=HD2, 2=HD3, 3=HD4)
 ```
 
 ### Fallback Behavior
@@ -216,9 +219,14 @@ This project is released under the MIT License. See the source code for full lic
 
 ## Changelog
 
+### Version 1.0.4
+- Added HD channel selection (HD1, HD2, HD3, HD4) with dropdown menu
+- HD channel selection is saved with presets
+- LCD display shows current HD channel
+- Automatic restart when switching HD channels during playback
+
 ### Version 1.0.3
-- Simplified interface (removed scan and HD program selection)
-- HD Radio defaults to HD1/Program 0
+- Simplified interface (removed scan feature)
 - Smart default frequency (uses P0 preset if available)
 - Fixed album art persistence when switching stations
 

@@ -63,6 +63,7 @@ class Cfg:
     device_index: int | None = None
     volume: float = 1.0
     ppm: int = 5          # +5 sounded best for you
+    hd_program: int = 0   # 0 for HD1, 1 for HD2, etc.
 
 class Worker(QtCore.QObject):
     started = QtCore.Signal(str)       # "hd" | "fm"
@@ -93,8 +94,8 @@ class Worker(QtCore.QObject):
         cmd = ["nrsc5"]
         if self.cfg.gain is not None: cmd += ["-g", str(self.cfg.gain)]
         if self.cfg.device_index is not None: cmd += ["-d", str(self.cfg.device_index)]
-        # -o - pipes audio to stdout for ffplay, default to program 0 (HD1)
-        cmd += ["-o", "-", f"{self.cfg.mhz}", "0"]
+        # -o - pipes audio to stdout for ffplay, use configured HD program (0=HD1, 1=HD2, etc.)
+        cmd += ["-o", "-", f"{self.cfg.mhz}", str(self.cfg.hd_program)]
         return cmd
 
     def rtl_fm_cmd(self) -> list[str]:
@@ -296,6 +297,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.chk_fallback.setChecked(True)
         row2.addWidget(self.btn_play); row2.addWidget(self.btn_stop); row2.addWidget(self.chk_fallback)
         left.addLayout(row2)
+        
+        # HD program selector (HD1, HD2, etc.)
+        hd_row = QtWidgets.QHBoxLayout()
+        hd_label = QtWidgets.QLabel("HD Channel:")
+        hd_label.setStyleSheet("color: #eee;")
+        self.hd_selector = QtWidgets.QComboBox()
+        self.hd_selector.addItems(["HD1", "HD2", "HD3", "HD4"])
+        self.hd_selector.setCurrentIndex(0)
+        self.hd_selector.currentIndexChanged.connect(self._on_hd_program_changed)
+        hd_row.addWidget(hd_label)
+        hd_row.addWidget(self.hd_selector)
+        hd_row.addStretch()
+        left.addLayout(hd_row)
 
         # log
         self.log = QtWidgets.QTextEdit(readOnly=True); self.log.setFixedHeight(230)
@@ -381,7 +395,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 b.setText(f"P{i}")
 
     def _save_preset(self, idx: int, mhz: float):
+        # Save both frequency and HD program selection
         self.presets[f"P{idx}"] = round(mhz, 1)
+        self.presets[f"P{idx}_hd"] = self.cfg.hd_program
         try:
             PRESETS_PATH.write_text(json.dumps(self.presets, indent=2))
         except Exception:
@@ -390,6 +406,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
     def _clear_preset(self, idx: int):
         self.presets.pop(f"P{idx}", None)
+        self.presets.pop(f"P{idx}_hd", None)
         try:
             PRESETS_PATH.write_text(json.dumps(self.presets, indent=2))
         except Exception:
@@ -399,7 +416,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _preset_menu(self, idx: int, pos: QtCore.QPoint):
         b = self.preset_buttons[idx]
         m = QtWidgets.QMenu(b)
-        m.addAction(f"Save current ({self._mhz():.1f} MHz) to P{idx}",
+        hd_text = f" HD{self.cfg.hd_program + 1}" if self.cfg.hd_program > 0 else ""
+        m.addAction(f"Save current ({self._mhz():.1f} MHz{hd_text}) to P{idx}",
                     lambda: self._save_preset(idx, self._mhz()))
         if f"P{idx}" in self.presets:
             m.addAction("Clear preset", lambda: self._clear_preset(idx))
@@ -411,6 +429,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._append_log(f"[preset] P{idx} is empty — right-click to save current frequency.")
             return
         mhz = self.presets[key]
+        # Load HD program if saved
+        hd_prog = self.presets.get(f"P{idx}_hd", 0)
+        self.cfg.hd_program = hd_prog
+        self.hd_selector.setCurrentIndex(hd_prog)
         self.freq_slider.setValue(int(round(mhz * 10)))
         self._update_lcd()
         if self.btn_play.isEnabled() is False:
@@ -420,7 +442,17 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _mhz(self) -> float: return round(self.freq_slider.value() / 10.0, 1)
 
     def _update_lcd(self):
-        self.lcd.setText(f"{self._mhz():.1f} MHz  ▶/⏸")
+        hd_text = f" HD{self.cfg.hd_program + 1}" if hasattr(self, 'cfg') else ""
+        self.lcd.setText(f"{self._mhz():.1f} MHz{hd_text}  ▶/⏸")
+    
+    def _on_hd_program_changed(self, index: int):
+        """Handle HD program selection change"""
+        self.cfg.hd_program = index
+        self._update_lcd()
+        # If currently playing HD, restart with new program
+        if hasattr(self, 'worker') and self.worker._mode == "hd":
+            self._append_log(f"[hd] Switching to HD{index + 1}")
+            self._play_clicked()
 
     def _append_log(self, s: str):
         self.log.append(s)
