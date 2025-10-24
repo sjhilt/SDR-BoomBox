@@ -31,6 +31,7 @@ from urllib.error import URLError, HTTPError
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import random
+import socket
 
 APP_NAME = "SDR-Boombox"
 FALLBACK_TIMEOUT_S = 6.0
@@ -497,10 +498,37 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._tray.setToolTip(APP_NAME)
         tray_menu = QtWidgets.QMenu()
         act_show = tray_menu.addAction("Show"); act_hide = tray_menu.addAction("Hide")
-        tray_menu.addSeparator(); act_quit = tray_menu.addAction("Quit")
+        tray_menu.addSeparator()
+        
+        # Streaming menu
+        stream_menu = tray_menu.addMenu("Stream to Speaker")
+        self.act_scan_speakers = stream_menu.addAction("Scan for Speakers")
+        self.act_scan_speakers.triggered.connect(self._scan_for_speakers)
+        stream_menu.addSeparator()
+        
+        # Sonos submenu
+        self.sonos_menu = stream_menu.addMenu("Sonos Speakers")
+        self.sonos_menu.addAction("No Sonos speakers found").setEnabled(False)
+        
+        # Google/Chromecast submenu
+        self.chromecast_menu = stream_menu.addMenu("Google/Chromecast")
+        self.chromecast_menu.addAction("No Chromecast devices found").setEnabled(False)
+        
+        stream_menu.addSeparator()
+        self.act_stop_streaming = stream_menu.addAction("⏹ Stop Streaming")
+        self.act_stop_streaming.triggered.connect(self._stop_streaming)
+        self.act_stop_streaming.setEnabled(False)
+        
+        tray_menu.addSeparator()
+        act_quit = tray_menu.addAction("Quit")
         act_show.triggered.connect(self.showNormal); act_hide.triggered.connect(self.hide)
         act_quit.triggered.connect(QtWidgets.QApplication.instance().quit)
         self._tray.setContextMenu(tray_menu); self._tray.show()
+        
+        # Streaming state
+        self._streaming_to = None  # Track what we're streaming to
+        self._sonos_devices = []
+        self._chromecast_devices = []
 
         # runtime objects
         self._load_presets()
@@ -865,9 +893,136 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # Switch to visualizer view
         self.art_stack.setCurrentWidget(self.visualizer)
 
+    # ----- streaming methods -----
+    def _scan_for_speakers(self):
+        """Scan for available Sonos and Chromecast devices"""
+        self._append_log("[stream] Scanning for speakers...")
+        
+        # Clear existing menus
+        self.sonos_menu.clear()
+        self.chromecast_menu.clear()
+        self._sonos_devices = []
+        self._chromecast_devices = []
+        
+        # Scan for Sonos speakers
+        try:
+            import soco
+            discovered = soco.discover(timeout=3)
+            if discovered:
+                for device in discovered:
+                    self._sonos_devices.append(device)
+                    action = self.sonos_menu.addAction(f"🔊 {device.player_name}")
+                    action.triggered.connect(lambda checked, d=device: self._stream_to_sonos(d))
+                self._append_log(f"[stream] Found {len(self._sonos_devices)} Sonos speaker(s)")
+            else:
+                self.sonos_menu.addAction("No Sonos speakers found").setEnabled(False)
+                self._append_log("[stream] No Sonos speakers found")
+        except ImportError:
+            self.sonos_menu.addAction("Install 'soco' library for Sonos support").setEnabled(False)
+            self._append_log("[stream] Sonos support requires 'soco' library: pip install soco")
+        except Exception as e:
+            self.sonos_menu.addAction("Error scanning for Sonos").setEnabled(False)
+            self._append_log(f"[stream] Sonos scan error: {e}")
+        
+        # Scan for Chromecast devices
+        try:
+            import pychromecast
+            services, browser = pychromecast.discovery.discover_chromecasts(timeout=3)
+            pychromecast.discovery.stop_discovery(browser)
+            
+            if services:
+                for service in services:
+                    # Get the actual Chromecast device
+                    cast = pychromecast.get_chromecast_from_service(service, browser.zc)
+                    self._chromecast_devices.append(cast)
+                    action = self.chromecast_menu.addAction(f"📱 {cast.name}")
+                    action.triggered.connect(lambda checked, c=cast: self._stream_to_chromecast(c))
+                self._append_log(f"[stream] Found {len(self._chromecast_devices)} Chromecast device(s)")
+            else:
+                self.chromecast_menu.addAction("No Chromecast devices found").setEnabled(False)
+                self._append_log("[stream] No Chromecast devices found")
+        except ImportError:
+            self.chromecast_menu.addAction("Install 'pychromecast' for Chromecast support").setEnabled(False)
+            self._append_log("[stream] Chromecast support requires 'pychromecast' library: pip install pychromecast")
+        except Exception as e:
+            self.chromecast_menu.addAction("Error scanning for Chromecast").setEnabled(False)
+            self._append_log(f"[stream] Chromecast scan error: {e}")
+        
+        self._append_log("[stream] Speaker scan complete")
+    
+    def _stream_to_sonos(self, device):
+        """Stream audio to a Sonos speaker"""
+        try:
+            self._append_log(f"[stream] Starting stream to Sonos: {device.player_name}")
+            
+            # Get the current machine's IP address
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            
+            # Create a simple HTTP server to serve the audio stream
+            # This is a simplified approach - in production you'd want a more robust solution
+            stream_url = f"http://{local_ip}:8080/stream.mp3"
+            
+            # For now, we'll use the radio station's stream URL if available
+            # In a full implementation, you'd capture and re-stream the audio
+            if self.worker._mode == "fm":
+                # For analog FM, we'd need to set up a local streaming server
+                self._append_log("[stream] Direct FM streaming to Sonos not yet implemented")
+                self._append_log("[stream] This would require setting up a local audio streaming server")
+                return
+            else:
+                # For HD radio, try to use the station's online stream if available
+                # This is a placeholder - you'd need to look up the station's streaming URL
+                station_freq = self._mhz()
+                self._append_log(f"[stream] Would stream {station_freq} MHz to {device.player_name}")
+                self._append_log("[stream] Note: Direct HD radio streaming requires additional implementation")
+            
+            self._streaming_to = f"Sonos: {device.player_name}"
+            self.act_stop_streaming.setEnabled(True)
+            
+        except Exception as e:
+            self._append_log(f"[stream] Error streaming to Sonos: {e}")
+    
+    def _stream_to_chromecast(self, cast):
+        """Stream audio to a Chromecast device"""
+        try:
+            self._append_log(f"[stream] Starting stream to Chromecast: {cast.name}")
+            
+            # Wait for cast device to be ready
+            cast.wait()
+            
+            # Get media controller
+            mc = cast.media_controller
+            
+            # Similar to Sonos, we'd need to provide a stream URL
+            # This is a simplified example
+            if self.worker._mode == "fm":
+                self._append_log("[stream] Direct FM streaming to Chromecast not yet implemented")
+                self._append_log("[stream] This would require setting up a local audio streaming server")
+                return
+            else:
+                station_freq = self._mhz()
+                self._append_log(f"[stream] Would stream {station_freq} MHz to {cast.name}")
+                self._append_log("[stream] Note: Direct HD radio streaming requires additional implementation")
+            
+            self._streaming_to = f"Chromecast: {cast.name}"
+            self.act_stop_streaming.setEnabled(True)
+            
+        except Exception as e:
+            self._append_log(f"[stream] Error streaming to Chromecast: {e}")
+    
+    def _stop_streaming(self):
+        """Stop streaming to external speakers"""
+        if self._streaming_to:
+            self._append_log(f"[stream] Stopping stream to {self._streaming_to}")
+            self._streaming_to = None
+            self.act_stop_streaming.setEnabled(False)
+            # Additional cleanup code would go here
+    
     # ----- lifecycle -----
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         try:
+            self._stop_streaming()  # Stop any active streaming
             self._fallback_timer.stop()
             QtCore.QMetaObject.invokeMethod(self.worker, "stop")
             if hasattr(self, 'thread') and self.thread.isRunning():

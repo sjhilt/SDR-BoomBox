@@ -1,1 +1,6 @@
 PySide6>=6.0.0
+
+# Optional: For streaming to speakers
+# Uncomment the following lines if you want to enable speaker streaming:
+# soco>=0.29.0  # For Sonos speaker support
+# pychromecast>=13.0.0  # For Google Cast/Chromecast support
