@@ -565,7 +565,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _looks_like_station(text: str) -> bool:
         if not text: return False
         t = text.lower()
-        bad = ["fm", "am", "radio", "station", "kiss", "rock", "country", "hits", "classic", "news", "talk"]
+        bad = ["fm", "am", "radio", "station", "kiss", "rock", "country", "hits", "classic", "news", "talk", "hd1", "hd2"]
         # loose heuristic: if contains obvious station-y words or a frequency pattern
         if any(w in t for w in bad): return True
         if re.search(r"\b\d{2,3}\.\d\b", t): return True
