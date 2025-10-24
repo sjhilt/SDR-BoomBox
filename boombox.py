@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
 """
 ===============================================================
    SDR-Boombox
@@ -10,7 +9,7 @@ Author:     @sjhilt
 Project:    SDR-Boombox (Software Defined Radio Tuner)
 License:    MIT License
 Website:    https://github.com/sjhilt/SDR-Boombox
-Version:    1.0.0
+Version:    1.0.2
 Python:     3.10+
 
 Description:
@@ -19,52 +18,34 @@ SDR-Boombox is a modern GUI-driven radio tuner for Software Defined Radios
 such as the RTL-SDR. It attempts HD Radio decoding first using `nrsc5`, and
 automatically falls back to analog wideband FM when digital signals are not
 available. The interface features live metadata, album art, scanning, presets,
-and cross-platform support.
+and a small system tray icon.
 
-Key Features:
--------------
-• HD Radio decoding via nrsc5
-• Automatic analog FM fallback (rtl_fm)
-• Live metadata display (station, song info, slogans)
-• Real-time album art and station icons
-• Manual tuning + preset buttons (JSON saved)
-• Spectrum scan with automatic station detection
-• System tray integration with 📻 icon
-• Clean, retro-inspired "boombox" aesthetic
-
-Dependencies:
--------------
-• nrsc5              For HD Radio decoding
-• rtl_fm, rtl_power  From rtl-sdr (for analog FM + scan)
-• ffplay             From FFmpeg (for audio playback)
-• Python PySide6     For the graphical interface
-
-===============================================================
 """
 
-import os, sys, re, json, subprocess, threading, time, math, shutil
+import os, sys, re, json, subprocess, threading, time, shutil, math
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote_plus
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "SDR-Boombox"
-FALLBACK_TIMEOUT_S = 6.0                       # time to wait for HD sync before analog fallback
+FALLBACK_TIMEOUT_S = 6.0
 PRESETS_PATH = Path.home() / ".sdr_boombox_presets.json"
-ART_DIR = Path.home() / ".sdr_boombox_art"     # where nrsc5 drops LOT images
-ART_DIR.mkdir(parents=True, exist_ok=True)
 
 def which(cmd: str) -> str | None:
     p = shutil.which(cmd)
     if p: return p
-    # quick manual PATH walk for .exe on Windows
+    # Windows .exe quick check
     for d in os.getenv("PATH", "").split(os.pathsep):
         if not d: continue
         cand = Path(d) / (cmd + ".exe")
         if cand.exists(): return str(cand)
     return None
 
-def _emoji_icon_pixmap(emoji: str, size: int = 256) -> QtGui.QPixmap:
+def emoji_pixmap(emoji: str, size: int = 256) -> QtGui.QPixmap:
     pm = QtGui.QPixmap(size, size)
     pm.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pm)
@@ -77,19 +58,18 @@ def _emoji_icon_pixmap(emoji: str, size: int = 256) -> QtGui.QPixmap:
 
 @dataclass
 class Cfg:
-    mhz: float = 99.5
-    hd_prog: int = 0            # HD subchannel (0..3)
-    gain: float | None = None
+    mhz: float = 105.5    # your workflow target
+    hd_prog: int = 0
+    gain: float | None = 28.0
     device_index: int | None = None
     volume: float = 1.0
-    ppm: int = 0                # PPM correction for analog FM (like you set in GQRX)
+    ppm: int = 5          # +5 sounded best for you
 
 class Worker(QtCore.QObject):
     started = QtCore.Signal(str)       # "hd" | "fm"
     stopped = QtCore.Signal(int, str)  # rc, mode
     logLine = QtCore.Signal(str)
     hdSynced = QtCore.Signal()
-    artReady = QtCore.Signal(str)      # path to new artwork
 
     def __init__(self, cfg: Cfg):
         super().__init__()
@@ -102,41 +82,37 @@ class Worker(QtCore.QObject):
 
     # ---------- command builders ----------
     def ffplay_cmd(self, is_fm: bool) -> list[str]:
-        base = ["ffplay", "-autoexit", "-nodisp", "-hide_banner", "-loglevel", "error"]
-        vol = max(0.01, min(self.cfg.volume, 3.0))
-        base += ["-af", f"volume={vol:.2f}"]
+        # Match your working CLI exactly for analog; HD stays raw pipe to ffplay
+        base = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "warning"]
         if is_fm:
-            base += ["-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "-"]
+            base += ["-f", "s16le", "-ar", "48000", "-i", "-"]
         else:
             base += ["-i", "-"]
         return base
 
     def nrsc5_cmd(self) -> list[str]:
-        # IMPORTANT: use lowercase -o for PCM audio to stdout
         cmd = ["nrsc5"]
-        if self.cfg.gain is not None:
-            cmd += ["-g", str(self.cfg.gain)]
-        if self.cfg.device_index is not None:
-            cmd += ["-d", str(self.cfg.device_index)]
-        # write decoded audio (PCM) to stdout for ffplay
+        if self.cfg.gain is not None: cmd += ["-g", str(self.cfg.gain)]
+        if self.cfg.device_index is not None: cmd += ["-d", str(self.cfg.device_index)]
+        # -o - pipes audio to stdout for ffplay
         cmd += ["-o", "-", f"{self.cfg.mhz}", f"{self.cfg.hd_prog}"]
         return cmd
 
     def rtl_fm_cmd(self) -> list[str]:
-        # Wideband FM with deemphasis, no squelch, resample to 48k for ffplay
+        # EXACT analog command shape that works for you:
+        # rtl_fm -M wbfm -f {MHz}M -s 200k -r 48k -E deemp=75 -g 28 -p +5 | ffplay -nodisp -autoexit -loglevel warning -f s16le -ar 48000 -
+        ppm_signed = f"{int(self.cfg.ppm):+d}" if self.cfg.ppm is not None else "+0"
+        gain_val = str(float(self.cfg.gain)) if self.cfg.gain is not None else "0"
         cmd = [
             "rtl_fm",
             "-M", "wbfm",
             "-f", f"{self.cfg.mhz}M",
-            "-s", "200k",          # wider than 170k, helps many stations
+            "-s", "200k",
             "-r", "48k",
-            "-E", "deemp=75",      # US deemphasis explicit
-            "-l", "0",             # squelch off
-            "-g", "0",             # auto-gain
-            "-A", "fast",          # AFC (you can remove if it drifts)
+            "-E", "deemp=75",
+            "-g", gain_val,
+            "-p", ppm_signed
         ]
-        if self.cfg.ppm:
-            cmd += ["-p", str(int(self.cfg.ppm))]
         return cmd
 
     # ---------- helpers ----------
@@ -169,26 +145,10 @@ class Worker(QtCore.QObject):
         try:
             if p.poll() is None:
                 p.terminate()
-                try: p.wait(timeout=1.5)
+                try: p.wait(timeout=1.25)
                 except subprocess.TimeoutExpired: p.kill()
         except Exception:
             pass
-
-    def _emit_latest_art(self, delay_s: float = 0.25):
-        """Pick the newest .png/.jpg from ART_DIR after a tiny delay and emit it."""
-        def run():
-            time.sleep(delay_s)
-            try:
-                pics = sorted(
-                    [p for p in ART_DIR.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")],
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True
-                )
-                if pics:
-                    self.artReady.emit(str(pics[0]))
-            except Exception:
-                pass
-        threading.Thread(target=run, daemon=True, name="art-latest").start()
 
     # ---------- slots ----------
     @QtCore.Slot()
@@ -224,15 +184,8 @@ class Worker(QtCore.QObject):
             self._pipe_forward(self._nrsc5.stdout, self._ffplay.stdin)
 
             def parse(line: str):
-                # HD lock hints
                 if ("Synchronized" in line) or ("Audio program" in line) or ("SIG Service:" in line):
                     self.hdSynced.emit()
-                # LOT file notifications -> try to show newest art
-                # Example lines in your logs:
-                # LOT file: port=0800 ... name=MT0044800393_1007807.jpg size=4552 ...
-                # LOT file: port=0810 ... name=TMT_... .png ...
-                if "LOT file:" in line and (".png" in line.lower() or ".jpg" in line.lower() or ".jpeg" in line.lower()):
-                    self._emit_latest_art(0.2)
 
             self._stderr_reader(self._nrsc5, "", parse)
             self.started.emit("hd")
@@ -258,69 +211,51 @@ class Worker(QtCore.QObject):
 
     # ---------- scanning (rtl_power) ----------
     def scan_fm(self, mhz_start=88.0, mhz_end=108.0, step_khz=200) -> list[tuple[float, float]]:
-        """
-        Returns list of (freq_mhz, power_db) candidates, strongest first.
-        Requires rtl_power.
-        """
         if not which("rtl_power"):
             raise RuntimeError("rtl_power not found in PATH")
-
-        # rtl_power CSV single sweep
         f_arg = f"{mhz_start}M:{mhz_end}M:{step_khz}k"
         cmd = ["rtl_power", "-f", f_arg, "-g", "0", "-1", "-c", "50%"]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         out, err = proc.communicate(timeout=60)
-
-        # Parse last CSV line (bins)
         lines = [l.strip() for l in out.splitlines() if l.strip()]
-        if not lines:
-            return []
-
+        if not lines: return []
         last = lines[-1].split(",")
-        # rtl_power format: date,time, hz_low, hz_high, hz_step, num_samples, dbm1,dbm2,...
-        if len(last) < 7:
-            return []
-
-        hz_low = float(last[2]); hz_high = float(last[3]); hz_step = float(last[4])
+        if len(last) < 7: return []
+        hz_low = float(last[2]); hz_step = float(last[4])
         powers = [float(x) for x in last[6:]]
         freqs_hz = [hz_low + i * hz_step for i in range(len(powers))]
 
-        # Smooth and peak-pick
-        def moving_avg(a, n=5):
+        def moving_avg(a, n=7):
             out = []
             for i in range(len(a)):
-                lo = max(0, i-n//2)
-                hi = min(len(a), i+n//2+1)
-                out.append(sum(a[lo:hi]) / (hi-lo))
+                lo = max(0, i-n//2); hi = min(len(a), i+n//2+1)
+                out.append(sum(a[lo:hi])/(hi-lo))
             return out
         sm = moving_avg(powers, 7)
-
-        # find local maxima above threshold
-        threshold = max(sm) - 6.0  # 6 dB below max
+        if not sm: return []
+        threshold = max(sm) - 6.0
         cands = []
         for i in range(1, len(sm)-1):
             if sm[i] > sm[i-1] and sm[i] > sm[i+1] and sm[i] >= threshold:
-                mhz = freqs_hz[i] / 1e6
-                # snap to standard 200 kHz grid (.1,.3,.5,.7,.9)
+                mhz = freqs_hz[i]/1e6
                 snapped = round(mhz * 5) / 5.0
                 cands.append((snapped, sm[i]))
-
-        # unique by freq, keep strongest
         best: dict[float,float] = {}
         for f,p in cands:
-            if f not in best or p > best[f]:
-                best[f] = p
-        out_list = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
-        return out_list
+            if f not in best or p > best[f]: best[f] = p
+        return sorted(best.items(), key=lambda kv: kv[1], reverse=True)
 
 class SDRBoombox(QtWidgets.QMainWindow):
-    # --- regex helpers (class-level) ---
+    # regex
     _ts_re      = re.compile(r"^\s*\d{2}:\d{2}:\d{2}\s+")
     _title_re   = re.compile(r"\bTitle:\s*(.+)", re.IGNORECASE)
     _artist_re  = re.compile(r"\bArtist:\s*(.+)", re.IGNORECASE)
     _album_re   = re.compile(r"\bAlbum:\s*(.+)", re.IGNORECASE)
     _slogan_re  = re.compile(r"\bSlogan:\s*(.+)", re.IGNORECASE)
     _station_re = re.compile(r"\bStation name:\s*(.+)", re.IGNORECASE)
+
+    artReady = QtCore.Signal(QtGui.QPixmap)
+    scanReady = QtCore.Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -344,27 +279,29 @@ class SDRBoombox(QtWidgets.QMainWindow):
             QComboBox { background:#222; color:#eee; border:1px solid #444; border-radius:8px; padding:4px 8px;}
         """)
 
-        # --- root layout ---
+        # root
         root = QtWidgets.QFrame(objectName="root"); self.setCentralWidget(root)
         grid = QtWidgets.QGridLayout(root); grid.setContentsMargins(16,16,16,16); grid.setHorizontalSpacing(14)
 
-        # --- LCD ---
+        # state (cfg before slider!)
+        self.cfg = Cfg(mhz=105.5, gain=28.0, ppm=5, hd_prog=0)
+
+        # LCD
         self.lcd = QtWidgets.QLabel("—.— MHz  ▶/⏸", objectName="lcd")
         f = self.lcd.font(); f.setPointSize(22); self.lcd.setFont(f)
         self.lcd.setAlignment(QtCore.Qt.AlignCenter)
         grid.addWidget(self.lcd, 0, 0, 1, 2)
 
-        # --- left controls ---
+        # left controls
         left = QtWidgets.QVBoxLayout()
 
-        # freq slider 88.0..108.0 (×10)
         self.freq_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.freq_slider.setRange(880, 1080)
-        self.freq_slider.setValue(995)
+        self.freq_slider.setValue(int(round(self.cfg.mhz * 10)))
         self.freq_slider.valueChanged.connect(self._update_lcd)
         left.addWidget(self.freq_slider)
 
-        # preset row (P0..P3)
+        # presets P0..P3
         pres_row = QtWidgets.QHBoxLayout()
         self.preset_buttons: list[QtWidgets.QPushButton] = []
         for i in range(4):
@@ -377,7 +314,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
             pres_row.addWidget(b)
         left.addLayout(pres_row)
 
-        # actions row
+        # play/stop + fallback
         row2 = QtWidgets.QHBoxLayout()
         self.btn_play = QtWidgets.QPushButton("▶ Play")
         self.btn_stop = QtWidgets.QPushButton("■ Stop")
@@ -386,15 +323,16 @@ class SDRBoombox(QtWidgets.QMainWindow):
         row2.addWidget(self.btn_play); row2.addWidget(self.btn_stop); row2.addWidget(self.chk_fallback)
         left.addLayout(row2)
 
-        # hd program chooser
+        # hd program
         hdrow = QtWidgets.QHBoxLayout()
         hdrow.addWidget(QtWidgets.QLabel("HD Program:"))
         self.hd_combo = QtWidgets.QComboBox(); self.hd_combo.addItems(["0","1","2","3"])
+        self.hd_combo.setCurrentIndex(self.cfg.hd_prog)
         self.hd_combo.currentIndexChanged.connect(self._hd_prog_changed)
         hdrow.addWidget(self.hd_combo); hdrow.addStretch(1)
         left.addLayout(hdrow)
 
-        # Scan
+        # scan
         self.btn_scan = QtWidgets.QPushButton("🔎 Scan (88–108 MHz)")
         self.btn_scan.clicked.connect(self._scan_click)
         left.addWidget(self.btn_scan)
@@ -405,10 +343,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
         grid.addLayout(left, 1, 0)
 
-        # --- right: art + metadata ---
+        # right: art + metadata
         right = QtWidgets.QVBoxLayout()
         self.art = QtWidgets.QLabel(objectName="art"); self.art.setFixedSize(260,260)
-        self.art.setAlignment(QtCore.Qt.AlignCenter); self._set_art_placeholder()
+        self.art.setAlignment(QtCore.Qt.AlignCenter); self.art.setPixmap(emoji_pixmap("📻", 220))
         right.addWidget(self.art)
 
         self.meta_card = QtWidgets.QFrame(objectName="metaCard")
@@ -420,10 +358,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
         right.addStretch(1)
         grid.addLayout(right, 1, 1)
 
-        # --- tray icon 📻 ---
+        # tray 📻
         self._tray = QtWidgets.QSystemTrayIcon(self)
-        self._tray.setIcon(QtGui.QIcon(_emoji_icon_pixmap("📻", 256)))
-        self._tray.setToolTip("SDR-Boombox")
+        self._tray.setIcon(QtGui.QIcon(emoji_pixmap("📻", 256)))
+        self._tray.setToolTip(APP_NAME)
         tray_menu = QtWidgets.QMenu()
         act_show = tray_menu.addAction("Show"); act_hide = tray_menu.addAction("Hide")
         tray_menu.addSeparator(); act_quit = tray_menu.addAction("Quit")
@@ -431,8 +369,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         act_quit.triggered.connect(QtWidgets.QApplication.instance().quit)
         self._tray.setContextMenu(tray_menu); self._tray.show()
 
-        # --- state ---
-        self.cfg = Cfg()
+        # runtime objects
         self._load_presets()
         self.worker = Worker(self.cfg)
         self.thread = QtCore.QThread(self); self.worker.moveToThread(self.thread); self.thread.start()
@@ -441,19 +378,26 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._fallback_timer = QtCore.QTimer(self); self._fallback_timer.setSingleShot(True)
         self._fallback_timer.timeout.connect(self._maybe_fallback_to_fm)
 
-        # metadata state
-        self._last_title = None
-        self._last_artist = None
+        # metadata and art state
+        self._station_name = ""
+        self._last_title = ""
+        self._last_artist = ""
+        self._last_album = ""
         self._has_song_meta = False
+        self._current_art_key = ""   # to avoid flicker
+        self._meta_debounce = QtCore.QTimer(self); self._meta_debounce.setSingleShot(True)
+        self._meta_debounce.setInterval(350)  # ms
+        self._meta_debounce.timeout.connect(self._maybe_fetch_art)
 
-        # --- signals ---
+        # signals
         self.btn_play.clicked.connect(self._play_clicked)
         self.btn_stop.clicked.connect(self._stop_clicked)
         self.worker.logLine.connect(self._handle_log_line)
         self.worker.started.connect(self._on_started)
         self.worker.stopped.connect(self._on_stopped)
         self.worker.hdSynced.connect(self._on_hd_synced)
-        self.worker.artReady.connect(self._set_art_path)
+        self.artReady.connect(self._set_album_art)
+        self.scanReady.connect(self._scan_done)
 
         self._update_lcd()
 
@@ -511,7 +455,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         mhz = self.presets[key]
         self.freq_slider.setValue(int(round(mhz * 10)))
         self._update_lcd()
-        # if already playing, retune on click
         if self.btn_play.isEnabled() is False:
             self._play_clicked()
 
@@ -524,31 +467,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _append_log(self, s: str):
         self.log.append(s)
 
-    def _set_art_placeholder(self, text="No Art"):
-        # subtle placeholder so the box doesn't collapse
-        self.art.setText(text)
-        self.art.setPixmap(QtGui.QPixmap())
-
-    def _set_art_pixmap(self, pm: QtGui.QPixmap):
-        if pm.isNull():
-            self._set_art_placeholder()
-            return
-        # scale while preserving aspect ratio, fill letterbox
-        target = self.art.size()
-        scaled = pm.scaled(target, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        self.art.setPixmap(scaled)
-        self.art.setText("")
-
-    @QtCore.Slot(str)
-    def _set_art_path(self, path: str):
-        pm = QtGui.QPixmap(path)
-        if pm.isNull():
-            # try tiny backoff once in case of slow writes
-            QtCore.QTimer.singleShot(200, lambda: self._set_art_path(path))
-            return
-        self._set_art_pixmap(pm)
-
-    # ----- UI slots -----
+    # ----- playback buttons -----
     def _play_clicked(self):
         self.cfg.mhz = self._mhz()
         self._hd_synced = False
@@ -573,12 +492,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _on_started(self, mode: str):
         self._append_log(f"[audio] started ({mode})")
         self.lcd.setText(self.lcd.text().replace("⏸", "▶", 1))
-        if mode == "hd":
-            # keep existing art if present; many stations reuse the same logo
-            pass
-        else:
-            # analog mode — clear art (no LOT images in FM)
-            self._set_art_placeholder("Analog FM")
 
     def _on_stopped(self, rc: int, mode: str):
         self._append_log(f"[audio] stopped rc={rc} ({mode})")
@@ -597,7 +510,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._append_log(f"[fallback] no HD sync in {FALLBACK_TIMEOUT_S:.0f}s, switching to analog FM")
         self.meta_title.setText("SDR-Boombox (Analog FM Mode)")
         self.meta_sub.setText("by @sjhilt")
-        self._set_art_placeholder("Analog FM")
         QtCore.QMetaObject.invokeMethod(self.worker, "start_fm")
 
     # ----- metadata/log parsing -----
@@ -605,16 +517,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._append_log(s)
         line = self._ts_re.sub("", s).strip()
 
-        # Station/Slogan only when not showing a current song
+        # Station name
         m = self._station_re.search(line)
-        if m and not self._has_song_meta:
-            self.meta_title.setText(m.group(1).strip())
+        if m:
+            self._station_name = m.group(1).strip()
+            if not self._has_song_meta:
+                self.meta_title.setText(self._station_name)
 
+        # Slogan
         m = self._slogan_re.search(line)
         if m and not self._has_song_meta:
             self.meta_sub.setText(m.group(1).strip())
 
-        # Title/Artist de-dup
+        # Title
         m = self._title_re.search(line)
         if m:
             t = m.group(1).strip()
@@ -623,52 +538,123 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 self._has_song_meta = False
                 self.meta_title.setText(t)
                 self.meta_sub.setText("")
+                self._meta_debounce.start()
 
+        # Artist
         m = self._artist_re.search(line)
         if m:
             a = m.group(1).strip()
             if a and a != self._last_artist:
                 self._last_artist = a
-                self.meta_sub.setText(a)
+                # if we already have a title, it's a real song tuple
                 if self._last_title:
                     self._has_song_meta = True
+                    self.meta_sub.setText(a)
+                self._meta_debounce.start()
 
+        # Album (optional)
         m = self._album_re.search(line)
         if m and self._has_song_meta:
-            al = m.group(1).strip()
+            self._last_album = m.group(1).strip()
             artist = self._last_artist or ""
-            self.meta_sub.setText(f"{artist} • {al}" if artist else al)
+            self.meta_sub.setText(f"{artist} • {self._last_album}" if artist else self._last_album)
 
-    # ----- scanning -----
+    # ----- heuristics + art fetch -----
+    @staticmethod
+    def _looks_like_station(text: str) -> bool:
+        if not text: return False
+        t = text.lower()
+        bad = ["fm", "am", "radio", "station", "kiss", "rock", "country", "hits", "classic", "news", "talk"]
+        # loose heuristic: if contains obvious station-y words or a frequency pattern
+        if any(w in t for w in bad): return True
+        if re.search(r"\b\d{2,3}\.\d\b", t): return True
+        return False
+
+    def _maybe_fetch_art(self):
+        # Decide whether we're in "song" or "station" mode
+        has_song = bool(self._last_title) and bool(self._last_artist)
+        song_title = (self._last_title or "").strip()
+        song_artist = (self._last_artist or "").strip()
+        st = (self._station_name or "").strip()
+
+        if has_song and not (self._looks_like_station(song_title) or self._looks_like_station(song_artist)):
+            # Track mode
+            key = f"TRACK||{song_artist}||{song_title}"
+            self._fetch_art_async(key, song_artist, song_title, station=None)
+        else:
+            # Station mode
+            label = st if st else f"{self._mhz():.1f} MHz"
+            key = f"STATION||{label}"
+            self.meta_title.setText(label)
+            if not st:
+                self.meta_sub.setText("SDR-Boombox")
+            self._fetch_art_async(key, artist=None, title=None, station=label)
+
+    def _fetch_art_async(self, key: str, artist: str | None, title: str | None, station: str | None):
+        # avoid duplicate/loop flicker
+        if key == self._current_art_key:
+            return
+        self._current_art_key = key
+
+        def job():
+            pm = QtGui.QPixmap()
+            # Try to fetch track art via iTunes public API when we have artist+title.
+            if artist and title:
+                try:
+                    q = quote_plus(f"{artist} {title}")
+                    req = Request(f"https://itunes.apple.com/search?term={q}&entity=song&limit=1",
+                                  headers={"User-Agent": "SDR-Boombox"})
+                    with urlopen(req, timeout=5) as r:
+                        data = r.read().decode("utf-8", "ignore")
+                    # very light parse to find artworkUrl100
+                    m = re.search(r'"artworkUrl100"\s*:\s*"([^"]+)"', data)
+                    if m:
+                        url = m.group(1).replace("100x100bb.jpg", "300x300bb.jpg")
+                        with urlopen(Request(url, headers={"User-Agent": "SDR-Boombox"}), timeout=5) as r2:
+                            raw = r2.read()
+                        pm.loadFromData(raw)
+                except Exception:
+                    pass
+
+            # If we still have no art, fallback to 📻 emoji
+            if pm.isNull():
+                pm = emoji_pixmap("📻", 220)
+
+            self.artReady.emit(pm)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    @QtCore.Slot(QtGui.QPixmap)
+    def _set_album_art(self, pm: QtGui.QPixmap):
+        if pm and not pm.isNull():
+            self.art.setPixmap(pm.scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+
+    # ----- scan -----
     def _scan_click(self):
         if not which("rtl_power"):
             QtWidgets.QMessageBox.warning(self, "Scan",
                 "rtl_power not found in PATH. Install rtl-sdr tools to use Scan.")
             return
-
         self._append_log("[scan] Running rtl_power sweep 88–108 MHz …")
         self.btn_scan.setEnabled(False)
-
         def do_scan():
             try:
                 stations = self.worker.scan_fm(88.0, 108.0, 200)
             except Exception as e:
                 stations = []
                 self._append_log(f"[scan] error: {e}")
-            # Use Qt queued invoke without Q_ARG(list) to avoid PySide metatype issues
-            QtCore.QTimer.singleShot(0, lambda: self._scan_done(stations))
-        threading.Thread(target=do_scan, daemon=True).start()
+            self.scanReady.emit(stations)
+        threading.Thread(target=do_scan, daemon=True, name="scan").start()
 
-    @QtCore.Slot()
+    @QtCore.Slot(list)
     def _scan_done(self, stations: list):
         self.btn_scan.setEnabled(True)
         if not stations:
             QtWidgets.QMessageBox.information(self, "Scan", "No strong stations detected.")
             return
-
         dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("Scan Results")
         v = QtWidgets.QVBoxLayout(dlg)
-        info = QtWidgets.QLabel("Click a station to tune. Right-click a preset to save it later.")
+        info = QtWidgets.QLabel("Double-click a station to tune. Right-click a preset to save it later.")
         v.addWidget(info)
         listw = QtWidgets.QListWidget()
         for f, p in stations:
@@ -677,14 +663,12 @@ class SDRBoombox(QtWidgets.QMainWindow):
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         v.addWidget(btns)
         btns.rejected.connect(dlg.reject)
-
         def tune_current(item: QtWidgets.QListWidgetItem):
             txt = item.text().split()[0]
             mhz = float(txt)
             self.freq_slider.setValue(int(round(mhz * 10)))
             self._play_clicked()
             dlg.accept()
-
         listw.itemDoubleClicked.connect(tune_current)
         dlg.resize(360, 420)
         dlg.exec()
