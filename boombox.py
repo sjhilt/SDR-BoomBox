@@ -31,13 +31,6 @@ from urllib.error import URLError, HTTPError
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import random
-try:
-    import pyaudio
-    import numpy as np
-    AUDIO_CAPTURE_AVAILABLE = True
-except ImportError:
-    AUDIO_CAPTURE_AVAILABLE = False
-    print("Warning: PyAudio or NumPy not installed. Audio-reactive visualization disabled.")
 
 APP_NAME = "SDR-Boombox"
 FALLBACK_TIMEOUT_S = 6.0
@@ -67,7 +60,7 @@ def emoji_pixmap(emoji: str, size: int = 256) -> QtGui.QPixmap:
 
 
 class VisualizerWidget(QtWidgets.QWidget):
-    """Winamp-style spectrum analyzer visualization with real audio reactivity"""
+    """Winamp-style spectrum analyzer visualization"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -89,23 +82,6 @@ class VisualizerWidget(QtWidgets.QWidget):
             QtGui.QColor(255, 0, 0),     # Red
         ]
         
-        # Audio capture setup
-        self.audio_stream = None
-        self.audio_thread = None
-        self.audio_running = False
-        self.frequency_data = [0.0] * self.num_bars
-        
-        if AUDIO_CAPTURE_AVAILABLE:
-            try:
-                self.p = pyaudio.PyAudio()
-                # Try to find loopback device (for capturing system audio)
-                self.audio_device_index = self._find_loopback_device()
-            except Exception as e:
-                print(f"Audio capture initialization failed: {e}")
-                self.p = None
-        else:
-            self.p = None
-        
         # Animation timer
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_visualization)
@@ -115,122 +91,25 @@ class VisualizerWidget(QtWidgets.QWidget):
         self.setStyleSheet("background: #000000; border: 1px solid #1a1a1a; border-radius: 12px;")
         
         self.is_playing = False
-    
-    def _find_loopback_device(self):
-        """Try to find a loopback audio device for capturing system audio"""
-        if not self.p:
-            return None
-            
-        # Look for loopback devices (varies by OS)
-        for i in range(self.p.get_device_count()):
-            info = self.p.get_device_info_by_index(i)
-            name = info.get('name', '').lower()
-            
-            # Common loopback device names
-            if any(keyword in name for keyword in ['loopback', 'stereo mix', 'what u hear', 'wave out', 'monitor']):
-                if info['maxInputChannels'] > 0:
-                    return i
-        
-        # If no loopback found, try default input (might capture from mic)
-        try:
-            return self.p.get_default_input_device_info()['index']
-        except:
-            return None
-    
-    def _audio_capture_thread(self):
-        """Thread function to capture and analyze audio"""
-        if not self.p or self.audio_device_index is None:
-            return
-            
-        try:
-            # Open audio stream
-            self.audio_stream = self.p.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=44100,
-                input=True,
-                input_device_index=self.audio_device_index,
-                frames_per_buffer=2048
-            )
-            
-            while self.audio_running:
-                try:
-                    # Read audio data
-                    data = self.audio_stream.read(2048, exception_on_overflow=False)
-                    
-                    # Convert to numpy array
-                    audio_data = np.frombuffer(data, dtype=np.int16)
-                    
-                    # Apply window function to reduce spectral leakage
-                    window = np.hanning(len(audio_data))
-                    audio_data = audio_data * window
-                    
-                    # Perform FFT
-                    fft_data = np.abs(np.fft.rfft(audio_data))
-                    
-                    # Get frequency bins for our bars
-                    freq_bins = len(fft_data) // self.num_bars
-                    
-                    for i in range(self.num_bars):
-                        start = i * freq_bins
-                        end = start + freq_bins
-                        
-                        # Average the FFT values for this bar's frequency range
-                        if end <= len(fft_data):
-                            avg = np.mean(fft_data[start:end])
-                            # Normalize and apply logarithmic scaling for better visualization
-                            normalized = np.log10(avg + 1) / 10.0  # Avoid log(0)
-                            self.frequency_data[i] = min(1.0, normalized * 2.0)  # Scale and cap at 1.0
-                        
-                except Exception as e:
-                    # Continue on audio errors (buffer overflow, etc.)
-                    pass
-                    
-        except Exception as e:
-            print(f"Audio capture error: {e}")
-        finally:
-            if self.audio_stream:
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-                self.audio_stream = None
         
     def set_playing(self, playing: bool):
         """Set whether audio is playing to animate the visualization"""
         self.is_playing = playing
         
-        if AUDIO_CAPTURE_AVAILABLE and self.p:
-            if playing and not self.audio_running:
-                # Start audio capture thread
-                self.audio_running = True
-                self.audio_thread = threading.Thread(target=self._audio_capture_thread, daemon=True)
-                self.audio_thread.start()
-            elif not playing and self.audio_running:
-                # Stop audio capture
-                self.audio_running = False
-                if self.audio_thread:
-                    self.audio_thread.join(timeout=1.0)
-                    self.audio_thread = None
-        
     def update_visualization(self):
         """Update the visualization bars"""
         if self.is_playing:
-            if AUDIO_CAPTURE_AVAILABLE and self.p and self.audio_running:
-                # Use real audio data if available
-                for i in range(self.num_bars):
-                    # Apply some smoothing and enhancement
-                    self.target_heights[i] = self.frequency_data[i] * 1.2  # Boost for visibility
-            else:
-                # Fallback to simulated visualization if audio capture not available
-                for i in range(self.num_bars):
-                    # Create a frequency response curve (higher in bass/mid, lower in treble)
-                    freq_factor = 1.0 - (i / self.num_bars) * 0.5
-                    base_height = random.uniform(0.2, 1.0) * freq_factor
-                    
-                    # Add some rhythm simulation (occasional beats)
-                    if random.random() < 0.15:  # 15% chance of a "beat"
-                        base_height = min(1.0, base_height + random.uniform(0.3, 0.5))
-                    
-                    self.target_heights[i] = base_height
+            # Simulated visualization
+            for i in range(self.num_bars):
+                # Create a frequency response curve (higher in bass/mid, lower in treble)
+                freq_factor = 1.0 - (i / self.num_bars) * 0.5
+                base_height = random.uniform(0.2, 1.0) * freq_factor
+                
+                # Add some rhythm simulation (occasional beats)
+                if random.random() < 0.15:  # 15% chance of a "beat"
+                    base_height = min(1.0, base_height + random.uniform(0.3, 0.5))
+                
+                self.target_heights[i] = base_height
         else:
             # Gradually decrease to zero when not playing
             self.target_heights = [0.0] * self.num_bars
@@ -309,13 +188,6 @@ class VisualizerWidget(QtWidgets.QWidget):
                 gradient.setColorAt(0, QtGui.QColor(0, 100, 0))
                 gradient.setColorAt(1, QtGui.QColor(0, 0, 0))
                 painter.fillRect(QtCore.QRectF(x, y, actual_bar_width, bar_height), gradient)
-    
-    def closeEvent(self, event):
-        """Clean up audio resources when closing"""
-        self.set_playing(False)
-        if self.p:
-            self.p.terminate()
-        super().closeEvent(event)
 
 @dataclass
 class Cfg:
