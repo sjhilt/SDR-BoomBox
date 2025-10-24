@@ -59,7 +59,6 @@ def emoji_pixmap(emoji: str, size: int = 256) -> QtGui.QPixmap:
 @dataclass
 class Cfg:
     mhz: float = 105.5    # your workflow target
-    hd_prog: int = 0
     gain: float | None = 28.0
     device_index: int | None = None
     volume: float = 1.0
@@ -94,8 +93,8 @@ class Worker(QtCore.QObject):
         cmd = ["nrsc5"]
         if self.cfg.gain is not None: cmd += ["-g", str(self.cfg.gain)]
         if self.cfg.device_index is not None: cmd += ["-d", str(self.cfg.device_index)]
-        # -o - pipes audio to stdout for ffplay
-        cmd += ["-o", "-", f"{self.cfg.mhz}", f"{self.cfg.hd_prog}"]
+        # -o - pipes audio to stdout for ffplay, default to program 0 (HD1)
+        cmd += ["-o", "-", f"{self.cfg.mhz}", "0"]
         return cmd
 
     def rtl_fm_cmd(self) -> list[str]:
@@ -209,41 +208,6 @@ class Worker(QtCore.QObject):
             self.logLine.emit(f"Missing executable: {e}")
             self.stop()
 
-    # ---------- scanning (rtl_power) ----------
-    def scan_fm(self, mhz_start=88.0, mhz_end=108.0, step_khz=200) -> list[tuple[float, float]]:
-        if not which("rtl_power"):
-            raise RuntimeError("rtl_power not found in PATH")
-        f_arg = f"{mhz_start}M:{mhz_end}M:{step_khz}k"
-        cmd = ["rtl_power", "-f", f_arg, "-g", "0", "-1", "-c", "50%"]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        out, err = proc.communicate(timeout=60)
-        lines = [l.strip() for l in out.splitlines() if l.strip()]
-        if not lines: return []
-        last = lines[-1].split(",")
-        if len(last) < 7: return []
-        hz_low = float(last[2]); hz_step = float(last[4])
-        powers = [float(x) for x in last[6:]]
-        freqs_hz = [hz_low + i * hz_step for i in range(len(powers))]
-
-        def moving_avg(a, n=7):
-            out = []
-            for i in range(len(a)):
-                lo = max(0, i-n//2); hi = min(len(a), i+n//2+1)
-                out.append(sum(a[lo:hi])/(hi-lo))
-            return out
-        sm = moving_avg(powers, 7)
-        if not sm: return []
-        threshold = max(sm) - 6.0
-        cands = []
-        for i in range(1, len(sm)-1):
-            if sm[i] > sm[i-1] and sm[i] > sm[i+1] and sm[i] >= threshold:
-                mhz = freqs_hz[i]/1e6
-                snapped = round(mhz * 5) / 5.0
-                cands.append((snapped, sm[i]))
-        best: dict[float,float] = {}
-        for f,p in cands:
-            if f not in best or p > best[f]: best[f] = p
-        return sorted(best.items(), key=lambda kv: kv[1], reverse=True)
 
 class SDRBoombox(QtWidgets.QMainWindow):
     # regex
@@ -255,7 +219,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
     _station_re = re.compile(r"\bStation name:\s*(.+)", re.IGNORECASE)
 
     artReady = QtCore.Signal(QtGui.QPixmap)
-    scanReady = QtCore.Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -283,8 +246,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
         root = QtWidgets.QFrame(objectName="root"); self.setCentralWidget(root)
         grid = QtWidgets.QGridLayout(root); grid.setContentsMargins(16,16,16,16); grid.setHorizontalSpacing(14)
 
+        # Load presets early to check for P0
+        self.presets: dict[str,float] = {}
+        if PRESETS_PATH.exists():
+            try:
+                self.presets = json.loads(PRESETS_PATH.read_text())
+            except Exception:
+                self.presets = {}
+        
+        # Use P0 if it exists, otherwise default to 98.7
+        default_freq = self.presets.get("P0", 98.7)
+        
         # state (cfg before slider!)
-        self.cfg = Cfg(mhz=105.5, gain=28.0, ppm=5, hd_prog=0)
+        self.cfg = Cfg(mhz=default_freq, gain=28.0, ppm=5)
 
         # LCD
         self.lcd = QtWidgets.QLabel("—.— MHz  ▶/⏸", objectName="lcd")
@@ -322,20 +296,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.chk_fallback.setChecked(True)
         row2.addWidget(self.btn_play); row2.addWidget(self.btn_stop); row2.addWidget(self.chk_fallback)
         left.addLayout(row2)
-
-        # hd program
-        hdrow = QtWidgets.QHBoxLayout()
-        hdrow.addWidget(QtWidgets.QLabel("HD Program:"))
-        self.hd_combo = QtWidgets.QComboBox(); self.hd_combo.addItems(["0","1","2","3"])
-        self.hd_combo.setCurrentIndex(self.cfg.hd_prog)
-        self.hd_combo.currentIndexChanged.connect(self._hd_prog_changed)
-        hdrow.addWidget(self.hd_combo); hdrow.addStretch(1)
-        left.addLayout(hdrow)
-
-        # scan
-        self.btn_scan = QtWidgets.QPushButton("🔎 Scan (88–108 MHz)")
-        self.btn_scan.clicked.connect(self._scan_click)
-        left.addWidget(self.btn_scan)
 
         # log
         self.log = QtWidgets.QTextEdit(readOnly=True); self.log.setFixedHeight(230)
@@ -397,7 +357,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.worker.stopped.connect(self._on_stopped)
         self.worker.hdSynced.connect(self._on_hd_synced)
         self.artReady.connect(self._set_album_art)
-        self.scanReady.connect(self._scan_done)
 
         self._update_lcd()
 
@@ -405,7 +364,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         if not which("nrsc5"): self._append_log("WARNING: nrsc5 not found in PATH.")
         if not which("ffplay"): self._append_log("WARNING: ffplay not found in PATH.")
         if not which("rtl_fm"): self._append_log("Note: rtl_fm not found; analog FM fallback unavailable.")
-        if not which("rtl_power"): self._append_log("Note: rtl_power not found; Scan will be disabled.")
 
     # ----- presets -----
     def _load_presets(self):
@@ -471,6 +429,20 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _play_clicked(self):
         self.cfg.mhz = self._mhz()
         self._hd_synced = False
+        
+        # Reset metadata and album art when starting new station
+        self._station_name = ""
+        self._last_title = ""
+        self._last_artist = ""
+        self._last_album = ""
+        self._has_song_meta = False
+        self._current_art_key = ""
+        
+        # Reset UI displays
+        self.meta_title.setText(f"{self._mhz():.1f} MHz")
+        self.meta_sub.setText("Tuning...")
+        self.art.setPixmap(emoji_pixmap("📻", 220))
+        
         self.btn_play.setEnabled(False)
         QtCore.QMetaObject.invokeMethod(self.worker, "start_hd")
         if self.chk_fallback.isChecked() and which("rtl_fm"):
@@ -484,9 +456,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         QtCore.QMetaObject.invokeMethod(self.worker, "stop")
         self.btn_play.setEnabled(True)
         self._update_lcd()
-
-    def _hd_prog_changed(self, idx: int):
-        self.cfg.hd_prog = idx
 
     # ----- worker callbacks -----
     def _on_started(self, mode: str):
@@ -628,50 +597,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _set_album_art(self, pm: QtGui.QPixmap):
         if pm and not pm.isNull():
             self.art.setPixmap(pm.scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-
-    # ----- scan -----
-    def _scan_click(self):
-        if not which("rtl_power"):
-            QtWidgets.QMessageBox.warning(self, "Scan",
-                "rtl_power not found in PATH. Install rtl-sdr tools to use Scan.")
-            return
-        self._append_log("[scan] Running rtl_power sweep 88–108 MHz …")
-        self.btn_scan.setEnabled(False)
-        def do_scan():
-            try:
-                stations = self.worker.scan_fm(88.0, 108.0, 200)
-            except Exception as e:
-                stations = []
-                self._append_log(f"[scan] error: {e}")
-            self.scanReady.emit(stations)
-        threading.Thread(target=do_scan, daemon=True, name="scan").start()
-
-    @QtCore.Slot(list)
-    def _scan_done(self, stations: list):
-        self.btn_scan.setEnabled(True)
-        if not stations:
-            QtWidgets.QMessageBox.information(self, "Scan", "No strong stations detected.")
-            return
-        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("Scan Results")
-        v = QtWidgets.QVBoxLayout(dlg)
-        info = QtWidgets.QLabel("Double-click a station to tune. Right-click a preset to save it later.")
-        v.addWidget(info)
-        listw = QtWidgets.QListWidget()
-        for f, p in stations:
-            listw.addItem(f"{f:.1f} MHz    ({p:.1f} dB)")
-        v.addWidget(listw)
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
-        v.addWidget(btns)
-        btns.rejected.connect(dlg.reject)
-        def tune_current(item: QtWidgets.QListWidgetItem):
-            txt = item.text().split()[0]
-            mhz = float(txt)
-            self.freq_slider.setValue(int(round(mhz * 10)))
-            self._play_clicked()
-            dlg.accept()
-        listw.itemDoubleClicked.connect(tune_current)
-        dlg.resize(360, 420)
-        dlg.exec()
 
     # ----- lifecycle -----
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:

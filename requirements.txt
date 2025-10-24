@@ -1,4 +1,1 @@
-PySide6
-requests
-pyaudio
-pillow
+PySide6>=6.0.0
