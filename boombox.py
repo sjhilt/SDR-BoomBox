@@ -37,6 +37,7 @@ APP_NAME = "SDR-Boombox"
 FALLBACK_TIMEOUT_S = 6.0
 PRESETS_PATH = Path.home() / ".sdr_boombox_presets.json"
 SETTINGS_PATH = Path.home() / ".sdr_boombox_settings.json"
+LOT_FILES_DIR = Path.home() / ".sdr_boombox_data"
 
 def which(cmd: str) -> str | None:
     p = shutil.which(cmd)
@@ -152,7 +153,7 @@ class VisualizerWidget(QtWidgets.QWidget):
         font = QtGui.QFont("Arial", 10)
         painter.setFont(font)
         painter.drawText(QtCore.QRect(0, 5, width, 20), 
-                        QtCore.Qt.AlignCenter, "♪ SPECTRUM ANALYZER ♪")
+                        QtCore.Qt.AlignCenter, "SPECTRUM ANALYZER")
         
         # Draw bars
         for i in range(self.num_bars):
@@ -225,9 +226,14 @@ class Worker(QtCore.QObject):
         return base
 
     def nrsc5_cmd(self) -> list[str]:
+        # Ensure the LOT files directory exists
+        LOT_FILES_DIR.mkdir(exist_ok=True)
+        
         cmd = ["nrsc5"]
         if self.cfg.gain is not None: cmd += ["-g", str(self.cfg.gain)]
         if self.cfg.device_index is not None: cmd += ["-d", str(self.cfg.device_index)]
+        # --dump-aas-files saves LOT files (album art and data services) to hidden directory
+        cmd += ["--dump-aas-files", str(LOT_FILES_DIR)]
         # -o - pipes audio to stdout for ffplay, use configured HD program (0=HD1, 1=HD2, etc.)
         cmd += ["-o", "-", f"{self.cfg.mhz}", str(self.cfg.hd_program)]
         return cmd
@@ -397,7 +403,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.cfg = Cfg(mhz=default_freq, gain=28.0, ppm=5)
 
         # LCD
-        self.lcd = QtWidgets.QLabel("—.— MHz  ▶/⏸", objectName="lcd")
+        self.lcd = QtWidgets.QLabel("—.— MHz", objectName="lcd")
         f = self.lcd.font(); f.setPointSize(22); self.lcd.setFont(f)
         self.lcd.setAlignment(QtCore.Qt.AlignCenter)
         grid.addWidget(self.lcd, 0, 0, 1, 2)
@@ -426,8 +432,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
         # play/stop + fallback
         row2 = QtWidgets.QHBoxLayout()
-        self.btn_play = QtWidgets.QPushButton("▶ Play")
-        self.btn_stop = QtWidgets.QPushButton("■ Stop")
+        self.btn_play = QtWidgets.QPushButton("Play")
+        self.btn_stop = QtWidgets.QPushButton("Stop")
         self.chk_fallback = QtWidgets.QCheckBox("Auto analog fallback")
         self.chk_fallback.setChecked(True)
         row2.addWidget(self.btn_play); row2.addWidget(self.btn_stop); row2.addWidget(self.chk_fallback)
@@ -443,26 +449,48 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.hd_selector.currentIndexChanged.connect(self._on_hd_program_changed)
         
         # Add log toggle button
-        self.btn_toggle_log = QtWidgets.QPushButton("Log")
+        self.btn_toggle_log = QtWidgets.QPushButton("Hide Log")
         self.btn_toggle_log.setCheckable(True)
         self.btn_toggle_log.setMaximumWidth(80)
         self.btn_toggle_log.clicked.connect(self._toggle_log_view)
         
+        # Map button (opens separate window)
+        self.btn_open_map = QtWidgets.QPushButton("Map")
+        self.btn_open_map.setToolTip("Open traffic & weather map in new window")
+        self.btn_open_map.clicked.connect(self._open_map_window)
+        
         hd_row.addWidget(hd_label)
         hd_row.addWidget(self.hd_selector)
         hd_row.addStretch()
+        hd_row.addWidget(self.btn_open_map)
         hd_row.addWidget(self.btn_toggle_log)
         left.addLayout(hd_row)
 
-        # log (initially hidden based on saved preference)
+        # Create tab widget for log
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setFixedHeight(230)
+        
+        # Log tab
         self.log = QtWidgets.QTextEdit(readOnly=True)
-        self.log.setFixedHeight(230)
-        left.addWidget(self.log, 1)
+        self.tabs.addTab(self.log, "Log")
+        
+        # Map window (initially None, created on demand)
+        self.map_window = None
+        self.map_widget = None
+        
+        # Initially show/hide based on saved preference
+        left.addWidget(self.tabs, 1)
 
         grid.addLayout(left, 1, 0)
 
         # right: art + metadata
         right = QtWidgets.QVBoxLayout()
+        
+        # Create container for art/visualizer with logo watermark
+        art_container = QtWidgets.QWidget()
+        art_container.setFixedSize(260, 260)
+        art_container_layout = QtWidgets.QGridLayout(art_container)
+        art_container_layout.setContentsMargins(0, 0, 0, 0)
         
         # Create a stacked widget to switch between album art and visualizer
         self.art_stack = QtWidgets.QStackedWidget()
@@ -472,7 +500,15 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.art = QtWidgets.QLabel(objectName="art")
         self.art.setFixedSize(260, 260)
         self.art.setAlignment(QtCore.Qt.AlignCenter)
-        self.art.setPixmap(emoji_pixmap("📻", 220))
+        # Default radio icon - create a simple text placeholder
+        default_pm = QtGui.QPixmap(260, 260)
+        default_pm.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(default_pm)
+        painter.setPen(QtGui.QColor(150, 150, 150))
+        painter.setFont(QtGui.QFont("Arial", 48))
+        painter.drawText(default_pm.rect(), QtCore.Qt.AlignCenter, "RADIO")
+        painter.end()
+        self.art.setPixmap(default_pm)
         
         # Visualizer widget
         self.visualizer = VisualizerWidget()
@@ -481,10 +517,27 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.art_stack.addWidget(self.art)
         self.art_stack.addWidget(self.visualizer)
         
-        right.addWidget(self.art_stack)
+        # Add art stack to container
+        art_container_layout.addWidget(self.art_stack, 0, 0)
+        
+        # Station logo watermark (bottom-right corner)
+        self.station_logo = QtWidgets.QLabel()
+        self.station_logo.setFixedSize(48, 48)
+        self.station_logo.setAlignment(QtCore.Qt.AlignCenter)
+        self.station_logo.setStyleSheet("""
+            background: rgba(0, 0, 0, 0.5); 
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 4px;
+        """)
+        self.station_logo.hide()  # Initially hidden
+        art_container_layout.addWidget(self.station_logo, 0, 0, QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight)
+        
+        right.addWidget(art_container)
 
         self.meta_card = QtWidgets.QFrame(objectName="metaCard")
         meta_layout = QtWidgets.QVBoxLayout(self.meta_card); meta_layout.setContentsMargins(12,10,12,10)
+        
         self.meta_title = QtWidgets.QLabel(" ", objectName="metaTitle"); self.meta_title.setWordWrap(True)
         self.meta_sub   = QtWidgets.QLabel(" ", objectName="metaSubtitle"); self.meta_sub.setWordWrap(True)
         meta_layout.addWidget(self.meta_title); meta_layout.addWidget(self.meta_sub)
@@ -492,9 +545,16 @@ class SDRBoombox(QtWidgets.QMainWindow):
         right.addStretch(1)
         grid.addLayout(right, 1, 1)
 
-        # tray 📻
+        # tray icon - create simple text icon
+        tray_pm = QtGui.QPixmap(256, 256)
+        tray_pm.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(tray_pm)
+        painter.setPen(QtGui.QColor(255, 255, 255))
+        painter.setFont(QtGui.QFont("Arial", 72, QtGui.QFont.Bold))
+        painter.drawText(tray_pm.rect(), QtCore.Qt.AlignCenter, "SDR")
+        painter.end()
         self._tray = QtWidgets.QSystemTrayIcon(self)
-        self._tray.setIcon(QtGui.QIcon(emoji_pixmap("📻", 256)))
+        self._tray.setIcon(QtGui.QIcon(tray_pm))
         self._tray.setToolTip(APP_NAME)
         tray_menu = QtWidgets.QMenu()
         act_show = tray_menu.addAction("Show"); act_hide = tray_menu.addAction("Hide")
@@ -525,6 +585,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._has_song_meta = False
         self._current_art_key = ""   # to avoid flicker
         self._has_album_art = False  # Track if we have real album art
+        self._has_lot_art = False    # Track if LOT art is available in stream
+        self._station_logo_file = ""  # Track current station logo file
+        self._traffic_tiles = {}  # Store traffic map tiles
+        self._last_traffic_timestamp = ""  # Track traffic map timestamp
+        self._weather_overlay_file = ""  # Store current weather overlay file
+        self._combined_map = None  # Store the combined traffic map
+        self._map_has_data = False  # Track if map has data to show
+        self._song_change_count = 0  # Track song changes for cleanup
         self._meta_debounce = QtCore.QTimer(self); self._meta_debounce.setSingleShot(True)
         self._meta_debounce.setInterval(350)  # ms
         self._meta_debounce.timeout.connect(self._maybe_fetch_art)
@@ -557,13 +625,18 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 pass
         
         # Apply settings
-        show_log = self.settings.get("show_log", True)
-        self.log.setVisible(show_log)
-        self.btn_toggle_log.setChecked(show_log)
+        show_tabs = self.settings.get("show_log", True)
+        self.tabs.setVisible(show_tabs)
+        self.btn_toggle_log.setChecked(show_tabs)
+        # Set initial button text
+        if show_tabs:
+            self.btn_toggle_log.setText("Hide Log")
+        else:
+            self.btn_toggle_log.setText("Show Log")
         
-        # Adjust window size based on log visibility
-        if not show_log:
-            # Make window smaller when log is hidden
+        # Adjust window size based on tabs visibility
+        if not show_tabs:
+            # Make window smaller when tabs are hidden
             self.setMinimumSize(1020, 350)
             if self.height() > 400:
                 self.resize(self.width(), 400)
@@ -576,16 +649,22 @@ class SDRBoombox(QtWidgets.QMainWindow):
             pass
     
     def _toggle_log_view(self):
-        """Toggle the visibility of the log view"""
-        show_log = self.btn_toggle_log.isChecked()
-        self.log.setVisible(show_log)
+        """Toggle the visibility of the tabs (log and data services)"""
+        show_tabs = self.btn_toggle_log.isChecked()
+        self.tabs.setVisible(show_tabs)
+        
+        # Update button text based on state
+        if show_tabs:
+            self.btn_toggle_log.setText("Hide Log")
+        else:
+            self.btn_toggle_log.setText("Show Log")
         
         # Save preference
-        self.settings["show_log"] = show_log
+        self.settings["show_log"] = show_tabs
         self._save_settings()
         
         # Adjust window minimum size
-        if show_log:
+        if show_tabs:
             self.setMinimumSize(1020, 580)
         else:
             self.setMinimumSize(1020, 350)
@@ -656,7 +735,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
     def _update_lcd(self):
         hd_text = f" HD{self.cfg.hd_program + 1}" if hasattr(self, 'cfg') else ""
-        self.lcd.setText(f"{self._mhz():.1f} MHz{hd_text}  ▶/⏸")
+        self.lcd.setText(f"{self._mhz():.1f} MHz{hd_text}")
     
     def _on_hd_program_changed(self, index: int):
         """Handle HD program selection change"""
@@ -668,13 +747,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._play_clicked()
 
     def _append_log(self, s: str):
-        # Only append to log if it exists and is visible
+        # Only append to log if it exists
         if hasattr(self, 'log'):
             self.log.append(s)
-            # If log is hidden but we're getting important messages, show indicator
-            if not self.log.isVisible() and any(keyword in s.lower() for keyword in ["error", "warning", "fail"]):
-                # Update button text to show there's something important
-                self.btn_toggle_log.setText(" Log ⚠")
 
     # ----- playback buttons -----
     def _play_clicked(self):
@@ -688,6 +763,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._last_album = ""
         self._has_song_meta = False
         self._current_art_key = ""
+        self._has_lot_art = False
+        self._station_logo_file = ""
+        self._song_change_count = 0  # Reset song counter
+        self._weather_overlay_file = ""  # Reset weather overlay
+        self._combined_map = None  # Reset combined map
+        self._map_has_data = False  # Reset map data flag
+        self.station_logo.hide()  # Hide station logo when changing stations
+        
+        # Clean up old LOT files (optional - keep last 100 files)
+        self._cleanup_lot_files()
+        
+        # Check for existing traffic map tiles and weather overlay
+        self._load_existing_map_data()
         
         # Reset UI displays
         self.meta_title.setText(f"{self._mhz():.1f} MHz")
@@ -713,7 +801,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
     # ----- worker callbacks -----
     def _on_started(self, mode: str):
         self._append_log(f"[audio] started ({mode})")
-        self.lcd.setText(self.lcd.text().replace("⏸", "▶", 1))
+        # Update LCD to show playing status
+        current_text = self.lcd.text()
+        if " [PLAYING]" not in current_text:
+            self.lcd.setText(current_text + " [PLAYING]")
         # Start visualizer animation
         self.visualizer.set_playing(True)
         # Prevent sleep while playing
@@ -721,7 +812,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
     def _on_stopped(self, rc: int, mode: str):
         self._append_log(f"[audio] stopped rc={rc} ({mode})")
-        self.lcd.setText(self.lcd.text().replace("▶", "⏸", 1))
+        # Remove playing status from LCD
+        self.lcd.setText(self.lcd.text().replace(" [PLAYING]", ""))
         self.btn_play.setEnabled(True)
         # Stop visualizer animation
         self.visualizer.set_playing(False)
@@ -746,6 +838,68 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _handle_log_line(self, s: str):
         self._append_log(s)
         line = self._ts_re.sub("", s).strip()
+        
+        # Check for LOT (album art) file writes from nrsc5
+        # nrsc5 outputs: "LOT file: port=0810 lot=136 name=TMT_03g9rc_2_1_20251031_1434_0088.png size=5131 mime=4F328CA0"
+        if "LOT file:" in line:
+            # Extract filename and port from the line
+            lot_match = re.search(r"port=(\d+).*?name=([^\s]+)", line)
+            if lot_match:
+                port = lot_match.group(1)
+                lot_file = lot_match.group(2).strip()
+                
+                # Check file type and identify what it is
+                if lot_file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                    # Handle traffic map tiles for assembly
+                    if 'TMT_' in lot_file:
+                        self._handle_traffic_tile(lot_file)
+                        return
+                    # Handle weather overlay
+                    elif 'DWRO_' in lot_file:
+                        self._handle_weather_overlay(lot_file)
+                        return
+                    # Skip DWRI text info files
+                    elif 'DWRI_' in lot_file:
+                        return
+                    elif 'TMI_' not in lot_file and port == "0810":
+                        # Check for station logo patterns
+                        # Station logos often have patterns like: SLWRXR$$, or persist with same LOT ID
+                        is_likely_logo = ('$$' in lot_file or 'SLWRXR' in lot_file or 
+                                         '_logo' in lot_file.lower() or
+                                         (lot_file.startswith('4655_') and '$$' in lot_file))
+                        
+                        if is_likely_logo:
+                            self._append_log(f"[art] Station logo detected: {lot_file}")
+                            self._handle_station_logo(lot_file)
+                        else:
+                            # Regular album art
+                            self._append_log(f"[art] Album art detected in HD Radio stream (LOT): {lot_file}")
+                            # Check if current metadata looks like a song
+                            if self._last_title and self._last_artist and not (
+                                self._looks_like_station(self._last_title) or 
+                                self._looks_like_station(self._last_artist)):
+                                # It's a song, so this LOT art is valid
+                                self._has_lot_art = True
+                                # Cancel any pending iTunes fetch since we have LOT art
+                                self._meta_debounce.stop()
+                                # Try to load the file if it exists
+                                self._handle_lot_art(lot_file)
+                            else:
+                                # Station content but not logo pattern, might be station art
+                                self._append_log(f"[art] Station content art (not logo): {lot_file}")
+                elif lot_file.lower().endswith('.txt'):
+                    # Skip text files - we're focusing on visual maps only
+                    if 'TMI_' in lot_file:
+                        self._append_log(f"[data] Traffic info text detected (skipping): {lot_file}")
+                    elif 'DWRI_' in lot_file:
+                        self._append_log(f"[data] Weather info text detected (skipping): {lot_file}")
+        # Also check for older format "Writing LOT file 'filename'"
+        elif "Writing LOT file" in line:
+            lot_match = re.search(r"Writing LOT file ['\"](.*?)['\"]", line)
+            if lot_match:
+                lot_file = lot_match.group(1).strip()
+                if lot_file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                    self._handle_lot_art(lot_file)
 
         # Station name
         m = self._station_re.search(line)
@@ -766,9 +920,27 @@ class SDRBoombox(QtWidgets.QMainWindow):
             if t and t != self._last_title:
                 self._last_title = t
                 self._has_song_meta = False
+                self._has_lot_art = False  # Reset LOT art flag for new song
                 self.meta_title.setText(t)
                 self.meta_sub.setText("")
-                self._meta_debounce.start()
+                
+                # Check if this looks like a station ID or non-song content
+                if self._looks_like_station(t):
+                    # Switch to visualizer for station content
+                    self._has_album_art = False
+                    self.art_stack.setCurrentWidget(self.visualizer)
+                    self._current_art_key = ""  # Reset key to allow new fetches
+                else:
+                    # It's likely a song, increment counter and check for cleanup
+                    self._song_change_count += 1
+                    self._append_log(f"[cleanup] Song change detected ({self._song_change_count}/3): {t[:30]}...")
+                    if self._song_change_count >= 3:
+                        self._song_change_count = 0
+                        self._smart_cleanup()
+                    # Reset art key to allow new fetch for this song
+                    self._current_art_key = ""
+                    # Try to fetch art
+                    self._meta_debounce.start()
 
         # Artist
         m = self._artist_re.search(line)
@@ -780,7 +952,20 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 if self._last_title:
                     self._has_song_meta = True
                     self.meta_sub.setText(a)
-                self._meta_debounce.start()
+                    
+                    # Check if this looks like station content
+                    if self._looks_like_station(a) or self._looks_like_station(self._last_title):
+                        # Switch to visualizer for station content
+                        self._has_album_art = False
+                        self._has_lot_art = False  # Reset LOT art flag
+                        self.art_stack.setCurrentWidget(self.visualizer)
+                        self._current_art_key = ""  # Reset key
+                    else:
+                        # It's a real song, reset art flags for new song
+                        self._has_lot_art = False
+                        self._current_art_key = ""
+                        # Try to fetch art
+                        self._meta_debounce.start()
 
         # Album (optional)
         m = self._album_re.search(line)
@@ -788,19 +973,330 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._last_album = m.group(1).strip()
             artist = self._last_artist or ""
             self.meta_sub.setText(f"{artist} • {self._last_album}" if artist else self._last_album)
+    
+    def _handle_weather_overlay(self, overlay_file: str):
+        """Handle weather radar overlay for the map"""
+        def try_load_overlay(attempts=0):
+            try:
+                overlay_path = LOT_FILES_DIR / overlay_file
+                
+                if overlay_path.exists():
+                    # Check if file is stable
+                    size1 = overlay_path.stat().st_size
+                    time.sleep(0.1)
+                    if overlay_path.exists():
+                        size2 = overlay_path.stat().st_size
+                        if size1 != size2 and attempts < 3:
+                            QtCore.QTimer.singleShot(200, lambda: try_load_overlay(attempts + 1))
+                            return
+                    
+                    # Store the weather overlay file
+                    self._weather_overlay_file = str(overlay_path)
+                    self._append_log(f"[map] Weather radar overlay received: {overlay_file}")
+                    
+                    # If we have a traffic map, update it with the overlay
+                    if self._combined_map:
+                        self._apply_weather_overlay()
+                    
+                elif attempts < 5:
+                    QtCore.QTimer.singleShot(500, lambda: try_load_overlay(attempts + 1))
+            except Exception as e:
+                self._append_log(f"[map] Error handling weather overlay: {e}")
+        
+        try_load_overlay()
+    
+    def _handle_traffic_tile(self, tile_file: str):
+        """Handle traffic map tiles and assemble them"""
+        def try_load_tile(attempts=0):
+            try:
+                tile_path = LOT_FILES_DIR / tile_file
+                
+                if tile_path.exists():
+                    # Check if file is stable
+                    size1 = tile_path.stat().st_size
+                    time.sleep(0.1)
+                    if tile_path.exists():
+                        size2 = tile_path.stat().st_size
+                        if size1 != size2 and attempts < 3:
+                            QtCore.QTimer.singleShot(200, lambda: try_load_tile(attempts + 1))
+                            return
+                    
+                    # Remove any prefix like ##_ from the filename for parsing
+                    clean_name = tile_file
+                    if '_TMT_' in tile_file:
+                        # Find where TMT starts and use from there
+                        tmt_index = tile_file.index('TMT_')
+                        clean_name = tile_file[tmt_index:]
+                    
+                    # Parse tile info from filename: TMT_03g9rc_2_1_20251031_1614_002e.png
+                    parts = clean_name.split('_')
+                    if len(parts) >= 6:
+                        row = int(parts[2])
+                        col = int(parts[3])
+                        timestamp = f"{parts[4]}_{parts[5]}"
+                        
+                        # Check if this is a new set of tiles
+                        if timestamp != self._last_traffic_timestamp and self._last_traffic_timestamp:
+                            # Delete old tiles
+                            self._cleanup_old_traffic_tiles(timestamp)
+                            self._traffic_tiles.clear()
+                        
+                        self._last_traffic_timestamp = timestamp
+                        
+                        # Store this tile
+                        self._traffic_tiles[(row, col)] = str(tile_path)
+                        self._append_log(f"[map] Traffic tile received: Row {row}, Col {col}")
+                        
+                        # Check if we have all 9 tiles (3x3 grid)
+                        if len(self._traffic_tiles) == 9:
+                            self._assemble_traffic_map()
+                    
+                elif attempts < 5:
+                    QtCore.QTimer.singleShot(500, lambda: try_load_tile(attempts + 1))
+            except Exception as e:
+                self._append_log(f"[map] Error handling traffic tile: {e}")
+        
+        try_load_tile()
+    
+    def _cleanup_old_traffic_tiles(self, new_timestamp: str):
+        """Delete old traffic tiles when new ones arrive"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                return
+            
+            # Find all TMT files that don't match the new timestamp (including prefixed ones)
+            for file in LOT_FILES_DIR.glob("*TMT_*.png"):
+                if new_timestamp not in file.name:
+                    try:
+                        file.unlink()
+                        self._append_log(f"[cleanup] Deleted old traffic tile: {file.name}")
+                    except:
+                        pass
+        except Exception as e:
+            self._append_log(f"[cleanup] Error removing old traffic tiles: {e}")
+    
+    def _assemble_traffic_map(self):
+        """Assemble the 3x3 traffic map tiles into one image"""
+        try:
+            # Load all tiles
+            tiles = {}
+            tile_size = None
+            
+            for (row, col), path in self._traffic_tiles.items():
+                pm = QtGui.QPixmap(path)
+                if not pm.isNull():
+                    tiles[(row, col)] = pm
+                    if tile_size is None:
+                        tile_size = (pm.width(), pm.height())
+            
+            if len(tiles) == 9 and tile_size:
+                # Create combined image (3x3 grid)
+                combined_width = tile_size[0] * 3
+                combined_height = tile_size[1] * 3
+                combined = QtGui.QPixmap(combined_width, combined_height)
+                combined.fill(QtCore.Qt.black)
+                
+                painter = QtGui.QPainter(combined)
+                
+                # Draw each tile in its position
+                for row in range(1, 4):
+                    for col in range(1, 4):
+                        if (row, col) in tiles:
+                            x = (col - 1) * tile_size[0]
+                            y = (row - 1) * tile_size[1]
+                            painter.drawPixmap(x, y, tiles[(row, col)])
+                
+                painter.end()
+                
+                # Store the combined traffic map
+                self._combined_map = combined
+                
+                # Apply weather overlay if we have one
+                if self._weather_overlay_file:
+                    self._apply_weather_overlay()
+                else:
+                    # Update map if window is open
+                    self._update_map_display(combined)
+                
+                self._append_log(f"[map] Traffic map assembled from 9 tiles")
+                
+                # Flash the map button to indicate update
+                self.btn_open_map.setText("Map •")
+                QtCore.QTimer.singleShot(3000, lambda: self.btn_open_map.setText("Map"))
+                
+        except Exception as e:
+            self._append_log(f"[map] Error assembling traffic map: {e}")
+    
+    def _apply_weather_overlay(self):
+        """Apply weather radar overlay on top of traffic map"""
+        try:
+            if not self._combined_map or not self._weather_overlay_file:
+                return
+            
+            # Load weather overlay
+            weather_pm = QtGui.QPixmap(self._weather_overlay_file)
+            if weather_pm.isNull():
+                return
+            
+            # Create a copy of the traffic map to overlay on
+            final_map = QtGui.QPixmap(self._combined_map)
+            
+            # Scale weather overlay to match traffic map size
+            scaled_weather = weather_pm.scaled(
+                final_map.size(),
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation
+            )
+            
+            # Paint weather overlay on top with transparency
+            painter = QtGui.QPainter(final_map)
+            painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+            painter.setOpacity(0.6)  # 60% opacity for weather overlay
+            
+            # Center the weather overlay on the traffic map
+            x = (final_map.width() - scaled_weather.width()) // 2
+            y = (final_map.height() - scaled_weather.height()) // 2
+            painter.drawPixmap(x, y, scaled_weather)
+            
+            painter.end()
+            
+            # Update map display
+            self._update_map_display(final_map)
+            
+            self._append_log("[map] Weather radar overlay applied to traffic map")
+            
+        except Exception as e:
+            self._append_log(f"[map] Error applying weather overlay: {e}")
+    
+    def _handle_station_logo(self, logo_file: str):
+        """Handle station logo display as watermark"""
+        def try_load_logo(attempts=0):
+            try:
+                # Try to load the logo file from our hidden directory
+                logo_path = LOT_FILES_DIR / logo_file
+                
+                if logo_path.exists():
+                    # Check if file size is stable
+                    size1 = logo_path.stat().st_size
+                    time.sleep(0.1)
+                    if logo_path.exists():
+                        size2 = logo_path.stat().st_size
+                        if size1 != size2 and attempts < 3:
+                            # File is still being written, retry
+                            QtCore.QTimer.singleShot(200, lambda: try_load_logo(attempts + 1))
+                            return
+                    
+                    pm = QtGui.QPixmap(str(logo_path))
+                    if not pm.isNull():
+                        # Scale the logo to fit while maintaining aspect ratio (smaller for watermark)
+                        scaled_pm = pm.scaled(40, 40, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                        self.station_logo.setPixmap(scaled_pm)
+                        self.station_logo.show()
+                        self.station_logo.raise_()  # Ensure it's on top
+                        self._station_logo_file = logo_file
+                        self._append_log(f"[art] Station logo watermark displayed: {logo_file}")
+                    else:
+                        self._append_log(f"[art] Logo file exists but couldn't load as image: {logo_file}")
+                elif attempts < 5:
+                    # File doesn't exist yet, retry
+                    self._append_log(f"[art] Waiting for logo file: {logo_file} (attempt {attempts + 1})")
+                    QtCore.QTimer.singleShot(500, lambda: try_load_logo(attempts + 1))
+                else:
+                    self._append_log(f"[art] Logo file never appeared: {logo_file}")
+            except Exception as e:
+                self._append_log(f"[art] Error handling logo file {logo_file}: {e}")
+        
+        # Only update if it's a different logo
+        if logo_file != self._station_logo_file:
+            try_load_logo()
+    
+    def _handle_lot_art(self, lot_file: str):
+        """Handle album art from LOT (NRSC-5 HD Radio)"""
+        def try_load_art(attempts=0):
+            try:
+                # Try to load the LOT file from our hidden directory
+                lot_path = LOT_FILES_DIR / lot_file
+                
+                if lot_path.exists():
+                    # Check if file size is stable (not still being written)
+                    size1 = lot_path.stat().st_size
+                    time.sleep(0.1)  # Small delay
+                    if lot_path.exists():
+                        size2 = lot_path.stat().st_size
+                        if size1 != size2 and attempts < 3:
+                            # File is still being written, retry
+                            QtCore.QTimer.singleShot(200, lambda: try_load_art(attempts + 1))
+                            return
+                    
+                    pm = QtGui.QPixmap(str(lot_path))
+                    if not pm.isNull():
+                        self._append_log(f"[art] Album art loaded from LOT file: {lot_file}")
+                        self._has_album_art = True
+                        self._current_art_key = f"LOT||{lot_file}"
+                        # Switch to album art immediately
+                        self.art.setPixmap(pm.scaled(self.art.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+                        self.art_stack.setCurrentWidget(self.art)
+                    else:
+                        self._append_log(f"[art] LOT file exists but couldn't load as image: {lot_file}")
+                elif attempts < 5:
+                    # File doesn't exist yet, retry after a short delay
+                    self._append_log(f"[art] Waiting for LOT file to be written: {lot_file} (attempt {attempts + 1})")
+                    QtCore.QTimer.singleShot(500, lambda: try_load_art(attempts + 1))
+                else:
+                    self._append_log(f"[art] LOT file never appeared: {lot_file}")
+            except Exception as e:
+                self._append_log(f"[art] Error handling LOT file {lot_file}: {e}")
+        
+        # Start trying to load the art
+        try_load_art()
+    
+    def _load_existing_map_data(self):
+        """Load existing traffic tiles and weather overlay"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                return
+            
+            # Load traffic tiles
+            self._load_existing_traffic_tiles()
+            
+            # Load most recent weather overlay
+            weather_files = list(LOT_FILES_DIR.glob("*DWRO_*.png"))
+            if weather_files:
+                # Sort by modification time, get most recent
+                weather_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                self._weather_overlay_file = str(weather_files[0])
+                self._append_log(f"[map] Loaded existing weather overlay: {weather_files[0].name}")
+                
+                # Apply overlay if we have a traffic map
+                if self._combined_map:
+                    self._apply_weather_overlay()
+                    
+        except Exception as e:
+            self._append_log(f"[map] Error loading existing map data: {e}")
+    
 
     # ----- heuristics + art fetch -----
     @staticmethod
     def _looks_like_station(text: str) -> bool:
         if not text: return False
         t = text.lower()
-        bad = ["fm", "am", "radio", "station", "kiss", "rock", "country", "hits", "classic", "news", "talk", "hd1", "hd2"]
+        bad = ["fm", "am", "radio", "station", "kiss", "rock", "country", "hits", "classic", "news", "talk", 
+               "hd1", "hd2", "commercial", "advertisement", "promo", "jingle", "id", "weather", "traffic",
+               "coming up", "you're listening", "stay tuned", "call us", "text us", "win", "contest"]
         # loose heuristic: if contains obvious station-y words or a frequency pattern
         if any(w in t for w in bad): return True
         if re.search(r"\b\d{2,3}\.\d\b", t): return True
+        # Also check for very short titles that are likely station IDs
+        if len(text) < 4 and not text.isdigit():
+            return True
         return False
 
     def _maybe_fetch_art(self):
+        # Don't fetch from iTunes if we already have LOT art from HD Radio
+        if self._has_lot_art:
+            self._append_log("[art] Skipping iTunes fetch - LOT art already available from HD Radio")
+            return
+            
         # Decide whether we're in "song" or "station" mode
         has_song = bool(self._last_title) and bool(self._last_artist)
         song_title = (self._last_title or "").strip()
@@ -833,6 +1329,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
             # Try to fetch track art via iTunes public API when we have artist+title.
             if artist and title:
                 try:
+                    self._append_log(f"[art] Fetching album art from iTunes API for: {artist} - {title}")
                     q = quote_plus(f"{artist} {title}")
                     req = Request(f"https://itunes.apple.com/search?term={q}&entity=song&limit=1",
                                   headers={"User-Agent": "SDR-Boombox"})
@@ -846,8 +1343,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
                             raw = r2.read()
                         pm.loadFromData(raw)
                         found_art = not pm.isNull()
-                except Exception:
-                    pass
+                        if found_art:
+                            self._append_log(f"[art] Album art retrieved from iTunes API successfully")
+                        else:
+                            self._append_log(f"[art] iTunes API returned invalid image data")
+                    else:
+                        self._append_log(f"[art] No album art found in iTunes API for: {artist} - {title}")
+                except Exception as e:
+                    self._append_log(f"[art] iTunes API fetch failed: {e}")
 
             # Store whether we found real album art
             self._has_album_art = found_art
@@ -874,6 +1377,70 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # Switch to visualizer view
         self.art_stack.setCurrentWidget(self.visualizer)
 
+    def _open_map_window(self):
+        """Open or focus the map window"""
+        if self.map_window is None or not self.map_window.isVisible():
+            # Create new map window
+            self.map_window = QtWidgets.QWidget()
+            self.map_window.setWindowTitle("Traffic & Weather Map")
+            self.map_window.setMinimumSize(600, 600)
+            self.map_window.resize(800, 800)
+            
+            # Create layout
+            layout = QtWidgets.QVBoxLayout(self.map_window)
+            layout.setContentsMargins(10, 10, 10, 10)
+            
+            # Create map widget
+            self.map_widget = QtWidgets.QLabel()
+            self.map_widget.setAlignment(QtCore.Qt.AlignCenter)
+            self.map_widget.setStyleSheet("background:#0f0f0f; border:2px solid #333; border-radius:8px;")
+            self.map_widget.setScaledContents(True)
+            
+            # Add to layout
+            layout.addWidget(self.map_widget)
+            
+            # Add refresh button
+            refresh_btn = QtWidgets.QPushButton("Refresh")
+            refresh_btn.clicked.connect(self._refresh_map)
+            layout.addWidget(refresh_btn)
+            
+            # Show current map if available
+            if self._combined_map:
+                if self._weather_overlay_file:
+                    # Re-apply weather overlay
+                    self._apply_weather_overlay()
+                else:
+                    self.map_widget.setPixmap(self._combined_map)
+                    self.map_widget.setText("")
+            else:
+                self.map_widget.setText("No map data available yet\n\nMaps will appear here when broadcast by the station")
+            
+            # Show the window
+            self.map_window.show()
+        else:
+            # Window exists, just bring it to front
+            self.map_window.raise_()
+            self.map_window.activateWindow()
+    
+    def _update_map_display(self, pixmap):
+        """Update the map display in the window if it's open"""
+        self._combined_map = pixmap
+        self._map_has_data = True
+        
+        if self.map_window and self.map_window.isVisible() and self.map_widget:
+            self.map_widget.setPixmap(pixmap)
+            self.map_widget.setText("")
+    
+    def _refresh_map(self):
+        """Refresh the map display"""
+        if self._combined_map:
+            if self._weather_overlay_file:
+                self._apply_weather_overlay()
+            else:
+                self.map_widget.setPixmap(self._combined_map)
+        else:
+            self.map_widget.setText("No map data available yet\n\nMaps will appear here when broadcast by the station")
+    
     def _prevent_sleep(self, prevent: bool):
         """Prevent or allow system sleep"""
         if sys.platform == "darwin":  # macOS
@@ -938,8 +1505,302 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     self._append_log("[system] Sleep prevention disabled")
     
     # ----- lifecycle -----
+    def _load_existing_traffic_tiles(self):
+        """Load existing traffic map tiles from the LOT directory"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                return
+            
+            # Find all TMT tiles (including those with prefixes like ##_TMT_)
+            tiles = list(LOT_FILES_DIR.glob("*TMT_*.png"))
+            if not tiles:
+                return
+            
+            # Group by timestamp
+            tile_groups = {}
+            for tile in tiles:
+                # Clean the filename to remove prefix
+                clean_name = tile.name
+                if '_TMT_' in tile.name:
+                    tmt_index = tile.name.index('TMT_')
+                    clean_name = tile.name[tmt_index:]
+                
+                parts = clean_name.split('_')
+                if len(parts) >= 6:
+                    timestamp = f"{parts[4]}_{parts[5]}"
+                    if timestamp not in tile_groups:
+                        tile_groups[timestamp] = []
+                    tile_groups[timestamp].append(tile)
+            
+            # Find the most recent complete set
+            for timestamp in sorted(tile_groups.keys(), reverse=True):
+                if len(tile_groups[timestamp]) == 9:
+                    # Load this set
+                    self._traffic_tiles.clear()
+                    self._last_traffic_timestamp = timestamp
+                    
+                    for tile in tile_groups[timestamp]:
+                        # Clean the filename to remove prefix
+                        clean_name = tile.name
+                        if '_TMT_' in tile.name:
+                            tmt_index = tile.name.index('TMT_')
+                            clean_name = tile.name[tmt_index:]
+                        
+                        parts = clean_name.split('_')
+                        row = int(parts[2])
+                        col = int(parts[3])
+                        self._traffic_tiles[(row, col)] = str(tile)
+                    
+                    self._assemble_traffic_map()
+                    self._append_log(f"[map] Loaded existing traffic map from {timestamp}")
+                    break
+                    
+        except Exception as e:
+            self._append_log(f"[map] Error loading existing traffic tiles: {e}")
+    
+    def _load_existing_data_files(self):
+        """Load existing weather/traffic data files from the LOT directory"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                return
+            
+            # Look for recent weather/traffic files (from the last 24 hours)
+            import datetime
+            cutoff_time = time.time() - (24 * 60 * 60)  # 24 hours ago
+            
+            # Find all relevant TEXT data files only (no maps)
+            data_files = []
+            for pattern in ['*TMI*.txt', '*DWRI*.txt']:
+                data_files.extend(LOT_FILES_DIR.glob(pattern))
+            
+            # Sort by modification time (newest first)
+            data_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            
+            # Load the most recent files of each type
+            loaded_types = set()
+            for file_path in data_files[:10]:  # Load up to 10 most recent files
+                # Skip old files
+                if file_path.stat().st_mtime < cutoff_time:
+                    continue
+                
+                filename = file_path.name
+                data_type = None
+                
+                if 'TMI_' in filename:
+                    data_type = "Traffic Info"
+                elif 'DWRI_' in filename:
+                    data_type = "Weather Info"
+                
+                # Only load one of each type
+                if data_type and data_type not in loaded_types:
+                    loaded_types.add(data_type)
+                    self._append_log(f"[data] Loading existing {data_type} from: {filename}")
+                    
+                    # Clear placeholder on first file
+                    if len(loaded_types) == 1:
+                        self.data_services.clear()
+                    
+                    # Read and display the file
+                    self._display_existing_data_file(filename, data_type)
+            
+            if loaded_types:
+                self._append_log(f"[data] Loaded {len(loaded_types)} existing data file(s)")
+        except Exception as e:
+            self._append_log(f"[data] Error loading existing files: {e}")
+    
+    def _display_existing_data_file(self, filename: str, data_type: str):
+        """Display an existing data file that's already on disk"""
+        try:
+            file_path = LOT_FILES_DIR / filename
+            
+            if file_path.exists():
+                # Read the file content
+                try:
+                    content = file_path.read_text(encoding='utf-8', errors='ignore')
+                except:
+                    content = file_path.read_bytes().decode('utf-8', errors='ignore')
+                
+                content = content.strip()
+                if content:
+                    # Update the Data Services tab with actual content
+                    timestamp = time.strftime("%H:%M:%S")
+                    
+                    # Add separator if there's existing content
+                    if self.data_services.toPlainText().strip():
+                        self.data_services.append("\n" + "="*60 + "\n")
+                    
+                    # Add header with timestamp and type
+                    self.data_services.append(f"[{timestamp}] {data_type} (from cache)")
+                    self.data_services.append("-" * 40)
+                    
+                    # Parse and format content based on type
+                    if "Traffic" in data_type and 'TMI_' in filename:
+                        # Parse traffic map protocol data
+                        self.data_services.append("TRAFFIC MAP CONFIGURATION:")
+                        self.data_services.append("")
+                        lines = content.split('\n')
+                        for line in lines:
+                            if '=' in line:
+                                key, value = line.split('=', 1)
+                                key = key.strip()
+                                value = value.strip('"').replace('";"', ', ')
+                                
+                                if key == 'StationList':
+                                    # Parse station list
+                                    stations = []
+                                    for s in value.split(','):
+                                        if 'FM' in s:
+                                            stations.append(s.strip('()'))
+                                    self.data_services.append(f"  Broadcasting Stations: {', '.join(stations)}")
+                                    self.data_services.append(f"    (These FM stations are transmitting this traffic data)")
+                                elif key == 'NumRows':
+                                    self.data_services.append(f"\n  Map Grid Size: {value} rows")
+                                elif key == 'NumColumns':
+                                    self.data_services.append(f"                 {value} columns")
+                                elif key == 'NumTransmittedTiles':
+                                    self.data_services.append(f"                 {value} total tiles")
+                                    self.data_services.append(f"    (The traffic map is divided into a {value}-tile grid)")
+                                elif 'CoordinatesRow' in key:
+                                    if key == 'CoordinatesRow1':
+                                        self.data_services.append(f"\n  Geographic Coverage (GPS Coordinates):")
+                                    # Parse coordinates
+                                    coords = value.replace('(', '').replace(')', '').split(',')
+                                    if len(coords) >= 2:
+                                        lat, lon = coords[0], coords[1]
+                                        self.data_services.append(f"    {key}: Latitude {lat}, Longitude {lon}")
+                                elif key == 'CopyrightNotice':
+                                    self.data_services.append(f"\n  {value}")
+                    elif "Weather" in data_type and 'DWRI_' in filename:
+                        # Parse weather radar protocol data
+                        self.data_services.append("WEATHER RADAR CONFIGURATION:")
+                        self.data_services.append("")
+                        self.data_services.append("WHAT THIS DATA MEANS:")
+                        self.data_services.append("  - Coverage Area: GPS boundaries of the weather radar map")
+                        self.data_services.append("  - Color Legends: RGB color codes for precipitation intensity")
+                        self.data_services.append("    (Lower numbers = lighter precipitation, Higher = heavier)")
+                        self.data_services.append("")
+                    else:
+                        # Generic data - just indent it
+                        lines = content.split('\n')
+                        for line in lines:
+                            if line.strip():
+                                self.data_services.append(f"  {line.strip()}")
+                    
+                    # Auto-scroll to bottom
+                    cursor = self.data_services.textCursor()
+                    cursor.movePosition(QtGui.QTextCursor.End)
+                    self.data_services.setTextCursor(cursor)
+        except Exception as e:
+            self._append_log(f"[data] Error displaying existing file: {e}")
+    
+    def _cleanup_lot_files(self, keep_count: int = 100):
+        """Clean up old LOT files, keeping only the most recent ones"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                return
+            
+            # Get all files in the LOT directory
+            files = list(LOT_FILES_DIR.glob("*"))
+            
+            # Sort by modification time (oldest first)
+            files.sort(key=lambda f: f.stat().st_mtime)
+            
+            # If we have more than keep_count files, delete the oldest
+            if len(files) > keep_count:
+                removed_count = 0
+                for f in files[:-keep_count]:
+                    try:
+                        f.unlink()
+                        removed_count += 1
+                    except:
+                        pass
+                if removed_count > 0:
+                    self._append_log(f"[cleanup] Removed {removed_count} old LOT files")
+        except Exception:
+            pass  # Silent cleanup
+    
+    def _smart_cleanup(self):
+        """Smart cleanup that runs after every 3rd song change"""
+        self._append_log("[cleanup] ========== SMART CLEANUP TRIGGERED (3 songs played) ==========")
+        self._periodic_cleanup()  # Use the same cleanup logic
+    
+    def _periodic_cleanup(self):
+        """Periodic cleanup logic used by smart cleanup"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                self._append_log("[cleanup] LOT directory doesn't exist, skipping cleanup")
+                return
+            
+            # Get current time
+            current_time = time.time()
+            cutoff_time = current_time - (20 * 60)  # Changed to 20 minutes for more aggressive cleanup
+            
+            # Count files before cleanup
+            all_files = list(LOT_FILES_DIR.glob("*"))
+            initial_count = len(all_files)
+            self._append_log(f"[cleanup] Starting cleanup - {initial_count} files in LOT directory")
+            
+            removed_count = 0
+            removed_files = []
+            preserved_tiles = set()
+            
+            # First, identify current traffic map tiles to preserve
+            if self._traffic_tiles:
+                for tile_path in self._traffic_tiles.values():
+                    preserved_tiles.add(Path(tile_path).name)
+                self._append_log(f"[cleanup] Preserving {len(preserved_tiles)} current traffic tiles")
+            
+            # Clean up old files
+            for file in LOT_FILES_DIR.glob("*"):
+                try:
+                    # Skip if it's part of current traffic map
+                    if file.name in preserved_tiles:
+                        continue
+                    
+                    # Skip if it's the current station logo
+                    if file.name == self._station_logo_file:
+                        continue
+                    
+                    # Skip current weather overlay
+                    if str(file) == self._weather_overlay_file:
+                        continue
+                    
+                    # Remove if older than 20 minutes
+                    file_age_minutes = (current_time - file.stat().st_mtime) / 60
+                    if file.stat().st_mtime < cutoff_time:
+                        file.unlink()
+                        removed_count += 1
+                        removed_files.append(f"{file.name} (age: {file_age_minutes:.1f} min)")
+                except Exception as e:
+                    self._append_log(f"[cleanup] Error removing {file.name}: {e}")
+            
+            if removed_count > 0:
+                self._append_log(f"[cleanup] Removed {removed_count} files older than 20 minutes")
+                # Log first few removed files for debugging
+                for rf in removed_files[:5]:
+                    self._append_log(f"[cleanup]   - {rf}")
+                if len(removed_files) > 5:
+                    self._append_log(f"[cleanup]   ... and {len(removed_files) - 5} more")
+            else:
+                self._append_log("[cleanup] No files old enough to remove")
+                
+            # Also do a size-based cleanup if directory is getting too large
+            remaining_files = list(LOT_FILES_DIR.glob("*"))
+            if len(remaining_files) > 100:  # Lowered threshold to 100 files
+                self._append_log(f"[cleanup] Directory has {len(remaining_files)} files, running size-based cleanup")
+                self._cleanup_lot_files(75)  # Keep only the most recent 75
+            
+            final_count = len(list(LOT_FILES_DIR.glob("*")))
+            self._append_log(f"[cleanup] Cleanup complete - {final_count} files remaining")
+                
+        except Exception as e:
+            self._append_log(f"[cleanup] Error during periodic cleanup: {e}")
+    
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         try:
+            # Close map window if open
+            if self.map_window and self.map_window.isVisible():
+                self.map_window.close()
             self._prevent_sleep(False)  # Re-enable sleep
             self._fallback_timer.stop()
             QtCore.QMetaObject.invokeMethod(self.worker, "stop")
