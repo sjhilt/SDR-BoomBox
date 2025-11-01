@@ -589,6 +589,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._has_album_art = False  # Track if we have real album art
         self._has_lot_art = False    # Track if LOT art is available in stream
         self._station_logo_file = ""  # Track current station logo file
+        self._pending_lot_art = ""  # Store LOT art that arrives before metadata
         self._traffic_tiles = {}  # Store traffic map tiles
         self._last_traffic_timestamp = ""  # Track traffic map timestamp
         self._weather_overlay_file = ""  # Store current weather overlay file
@@ -767,6 +768,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._current_art_key = ""
         self._has_lot_art = False
         self._station_logo_file = ""
+        self._pending_lot_art = ""  # Reset pending art
         self._song_change_count = 0  # Reset song counter
         self._weather_overlay_file = ""  # Reset weather overlay
         self._combined_map = None  # Reset combined map
@@ -863,7 +865,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     # Skip DWRI text info files
                     elif 'DWRI_' in lot_file:
                         return
-                    elif 'TMI_' not in lot_file and port == "0810":
+                    else:
+                        # Not a traffic/weather file, check if it's album art or station logo
                         # Check for station logo patterns
                         # Station logos often have patterns like: SLWRXR$$, or persist with same LOT ID
                         is_likely_logo = ('$$' in lot_file or 'SLWRXR' in lot_file or 
@@ -874,9 +877,11 @@ class SDRBoombox(QtWidgets.QMainWindow):
                             self._append_log(f"[art] Station logo detected: {lot_file}")
                             self._handle_station_logo(lot_file)
                         else:
-                            # Regular album art
+                            # Regular album art - check if it matches XHDR pattern or is generic album art
+                            # Files like "7269_SD0037672425_1728995.jpg" are album art
                             self._append_log(f"[art] Album art detected in HD Radio stream (LOT): {lot_file}")
-                            # Check if current metadata looks like a song
+                            
+                            # Always try to load album art if we have song metadata
                             if self._last_title and self._last_artist and not (
                                 self._looks_like_station(self._last_title) or 
                                 self._looks_like_station(self._last_artist)):
@@ -887,8 +892,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
                                 # Try to load the file if it exists
                                 self._handle_lot_art(lot_file)
                             else:
-                                # Station content but not logo pattern, might be station art
-                                self._append_log(f"[art] Station content art (not logo): {lot_file}")
+                                # Could be station art or we're waiting for metadata
+                                # Store it temporarily in case metadata comes after the art
+                                self._append_log(f"[art] Storing art file for potential use: {lot_file}")
+                                self._pending_lot_art = lot_file
+                                # Set multiple timers to check for metadata
+                                QtCore.QTimer.singleShot(500, lambda: self._check_pending_art())
+                                QtCore.QTimer.singleShot(1500, lambda: self._check_pending_art())
+                                QtCore.QTimer.singleShot(3000, lambda: self._check_pending_art())
                 elif lot_file.lower().endswith('.txt'):
                     # Skip text files - we're focusing on visual maps only
                     if 'TMI_' in lot_file:
@@ -991,6 +1002,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
             try:
                 overlay_path = LOT_FILES_DIR / overlay_file
                 
+                # If the exact file doesn't exist, try to find it with a prefix
+                if not overlay_path.exists():
+                    # Look for files that end with the overlay_file name
+                    matching_files = list(LOT_FILES_DIR.glob(f"*_{overlay_file}"))
+                    if matching_files:
+                        overlay_path = matching_files[0]
+                        self._append_log(f"[map] Found weather overlay with prefix: {overlay_path.name}")
+                
                 if overlay_path.exists():
                     # Check if file is stable
                     size1 = overlay_path.stat().st_size
@@ -1011,6 +1030,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     
                 elif attempts < 5:
                     QtCore.QTimer.singleShot(500, lambda: try_load_overlay(attempts + 1))
+                else:
+                    self._append_log(f"[map] Weather overlay never appeared: {overlay_file}")
             except Exception as e:
                 self._append_log(f"[map] Error handling weather overlay: {e}")
         
@@ -1021,6 +1042,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
         def try_load_tile(attempts=0):
             try:
                 tile_path = LOT_FILES_DIR / tile_file
+                
+                # If the exact file doesn't exist, try to find it with a prefix
+                if not tile_path.exists():
+                    # Look for files that end with the tile_file name
+                    matching_files = list(LOT_FILES_DIR.glob(f"*_{tile_file}"))
+                    if matching_files:
+                        tile_path = matching_files[0]
+                        self._append_log(f"[map] Found traffic tile with prefix: {tile_path.name}")
                 
                 if tile_path.exists():
                     # Check if file is stable
@@ -1054,7 +1083,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
                         
                         self._last_traffic_timestamp = timestamp
                         
-                        # Store this tile
+                        # Store this tile with the actual path
                         self._traffic_tiles[(row, col)] = str(tile_path)
                         self._append_log(f"[map] Traffic tile received: Row {row}, Col {col}")
                         
@@ -1064,6 +1093,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     
                 elif attempts < 5:
                     QtCore.QTimer.singleShot(500, lambda: try_load_tile(attempts + 1))
+                else:
+                    self._append_log(f"[map] Traffic tile never appeared: {tile_file}")
             except Exception as e:
                 self._append_log(f"[map] Error handling traffic tile: {e}")
         
@@ -1186,6 +1217,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 # Try to load the logo file from our hidden directory
                 logo_path = LOT_FILES_DIR / logo_file
                 
+                # If the exact file doesn't exist, try to find it with a prefix
+                if not logo_path.exists():
+                    # Look for files that end with the logo_file name
+                    matching_files = list(LOT_FILES_DIR.glob(f"*_{logo_file}"))
+                    if matching_files:
+                        logo_path = matching_files[0]
+                        self._append_log(f"[art] Found logo file with prefix: {logo_path.name}")
+                
                 if logo_path.exists():
                     # Check if file size is stable
                     size1 = logo_path.stat().st_size
@@ -1227,6 +1266,15 @@ class SDRBoombox(QtWidgets.QMainWindow):
             try:
                 # Try to load the LOT file from our hidden directory
                 lot_path = LOT_FILES_DIR / lot_file
+                
+                # If the exact file doesn't exist, try to find it with a prefix
+                if not lot_path.exists():
+                    # Look for files that end with the lot_file name
+                    # (nrsc5 adds a prefix like "7276_" to the filename)
+                    matching_files = list(LOT_FILES_DIR.glob(f"*_{lot_file}"))
+                    if matching_files:
+                        lot_path = matching_files[0]  # Use the first match
+                        self._append_log(f"[art] Found LOT file with prefix: {lot_path.name}")
                 
                 if lot_path.exists():
                     # Check if file size is stable (not still being written)
@@ -1291,15 +1339,29 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _looks_like_station(text: str) -> bool:
         if not text: return False
         t = text.lower()
-        bad = ["fm", "am", "radio", "station", "kiss", "rock", "country", "hits", "classic", "news", "talk", 
-               "hd1", "hd2", "commercial", "advertisement", "promo", "jingle", "id", "weather", "traffic",
-               "coming up", "you're listening", "stay tuned", "call us", "text us", "win", "contest"]
-        # loose heuristic: if contains obvious station-y words or a frequency pattern
-        if any(w in t for w in bad): return True
-        if re.search(r"\b\d{2,3}\.\d\b", t): return True
-        # Also check for very short titles that are likely station IDs
-        if len(text) < 4 and not text.isdigit():
-            return True
+        # More specific patterns for actual station IDs and promos
+        bad_phrases = ["commercial", "advertisement", "promo", "jingle", "weather", "traffic",
+                      "coming up", "you're listening", "stay tuned", "call us", "text us", "win", 
+                      "contest", "hd1", "hd2", "station id", "station identification", "#1"]
+        
+        # Check for exact phrase matches
+        for phrase in bad_phrases:
+            if phrase in t:
+                return True
+        
+        # Check if it's JUST a station name/slogan (no actual song info)
+        station_only_patterns = [
+            r"^(kiss|rock|country|hits|classic|news|talk)\s*(fm|am)?$",  # Just "KISS FM" etc
+            r"^\d{2,3}\.\d\s*(fm|am)?$",  # Just frequency like "103.7"
+            r"chattanooga'?s?\s+(rock|country|hits|classic)\s+station",  # Station slogans
+            r"^(rock|kiss|country|hits|classic)\s+\d{2,3}\.\d$"  # "Rock 103.7" pattern
+        ]
+        
+        for pattern in station_only_patterns:
+            if re.search(pattern, t):
+                return True
+        
+        # Don't filter out legitimate short artist names (removed the very short check)
         return False
 
     def _maybe_fetch_art(self):
@@ -1387,6 +1449,22 @@ class SDRBoombox(QtWidgets.QMainWindow):
         """Switch to visualizer when no album art is available"""
         # Switch to visualizer view
         self.art_stack.setCurrentWidget(self.visualizer)
+    
+    def _check_pending_art(self):
+        """Check if we now have metadata for pending album art"""
+        if self._pending_lot_art and self._last_title and self._last_artist:
+            # We now have metadata, check if it's a song
+            if not (self._looks_like_station(self._last_title) or 
+                    self._looks_like_station(self._last_artist)):
+                # It's a song, load the pending art
+                self._append_log(f"[art] Loading pending album art now that metadata is available")
+                self._has_lot_art = True
+                self._meta_debounce.stop()  # Cancel any iTunes fetch
+                self._handle_lot_art(self._pending_lot_art)
+                self._pending_lot_art = ""  # Clear pending
+            else:
+                # It's station content, clear pending
+                self._pending_lot_art = ""
 
     def _open_map_window(self):
         """Open or focus the map window"""
