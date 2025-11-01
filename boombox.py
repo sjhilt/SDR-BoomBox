@@ -907,7 +907,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
         m = self._station_re.search(line)
         if m:
             self._station_name = m.group(1).strip()
-            if not self._has_song_meta:
+            # Only show station name if we don't have a song title
+            if not self._last_title or self._looks_like_station(self._last_title):
                 self.meta_title.setText(self._station_name)
 
         # Slogan
@@ -921,10 +922,12 @@ class SDRBoombox(QtWidgets.QMainWindow):
             t = m.group(1).strip()
             if t and t != self._last_title:
                 self._last_title = t
-                self._has_song_meta = False
                 self._has_lot_art = False  # Reset LOT art flag for new song
+                # Always display the title when we get it
                 self.meta_title.setText(t)
-                self.meta_sub.setText("")
+                # Clear subtitle until we get artist info
+                if not self._last_artist:
+                    self.meta_sub.setText("")
                 
                 # Check if this looks like a station ID or non-song content
                 if self._looks_like_station(t):
@@ -950,10 +953,13 @@ class SDRBoombox(QtWidgets.QMainWindow):
             a = m.group(1).strip()
             if a and a != self._last_artist:
                 self._last_artist = a
-                # if we already have a title, it's a real song tuple
+                # Update subtitle with artist
                 if self._last_title:
                     self._has_song_meta = True
                     self.meta_sub.setText(a)
+                    # Make sure title is still showing the song, not station
+                    if self._last_title and not self._looks_like_station(self._last_title):
+                        self.meta_title.setText(self._last_title)
                     
                     # Check if this looks like station content
                     if self._looks_like_station(a) or self._looks_like_station(self._last_title):

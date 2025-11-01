@@ -202,9 +202,20 @@ class StatsViewer(QtWidgets.QMainWindow):
                 color: #eee; 
                 border: 1px solid #444;
                 gridline-color: #333;
+                alternate-background-color: #323232;
             }
-            QTableWidget::item { padding: 4px; }
-            QTableWidget::item:selected { background: #4a4a4a; }
+            QTableWidget::item { 
+                padding: 4px; 
+                color: #eee;
+                background-color: transparent;
+            }
+            QTableWidget::item:alternate { 
+                background-color: #323232;
+            }
+            QTableWidget::item:selected { 
+                background: #4a4a4a; 
+                color: #fff;
+            }
             QHeaderView::section { 
                 background: #333; 
                 color: #fff; 
