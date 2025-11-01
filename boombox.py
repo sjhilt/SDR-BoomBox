@@ -201,7 +201,7 @@ class VisualizerWidget(QtWidgets.QWidget):
 @dataclass
 class Cfg:
     mhz: float = 105.5    # your workflow target
-    gain: float | None = 28.0
+    gain: float | None = 40.0
     device_index: int | None = None
     volume: float = 1.0
     ppm: int = 5          # +5 sounded best for you
@@ -408,7 +408,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         default_freq = self.presets.get("P0", 98.7)
         
         # state (cfg before slider!)
-        self.cfg = Cfg(mhz=default_freq, gain=28.0, ppm=5)
+        self.cfg = Cfg(mhz=default_freq, gain=40.0, ppm=5)
 
         # LCD
         self.lcd = QtWidgets.QLabel("—.— MHz", objectName="lcd")

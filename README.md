@@ -168,7 +168,7 @@ The application uses these default settings (adjustable in code):
 @dataclass
 class Cfg:
     mhz: float = 98.7          # Default frequency (or P0 if set)
-    gain: float | None = 28.0  # RTL-SDR gain
+    gain: float | None = 40.0  # RTL-SDR gain
     device_index: int | None = None  # Auto-select device
     volume: float = 1.0        # Audio volume
     ppm: int = 5               # Frequency correction
