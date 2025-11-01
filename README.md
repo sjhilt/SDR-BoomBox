@@ -4,7 +4,7 @@ A modern GUI-driven HD Radio (NRSC-5) and analog FM receiver for Software Define
 
 ![SDR-BoomBox In Action!](https://raw.githubusercontent.com/sjhilt/SDR-BoomBox/refs/heads/main/resources/screenshot.png)
 
-![Version](https://img.shields.io/badge/version-1.0.2-blue)
+![Version](https://img.shields.io/badge/version-1.0.5-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
@@ -29,6 +29,12 @@ A modern GUI-driven HD Radio (NRSC-5) and analog FM receiver for Software Define
 - **Persistent Settings**: Presets saved to `~/.sdr_boombox_presets.json`
 - **Smart Default Frequency**: Uses preset P0 as default if set, otherwise 98.7 MHz
 - **Configurable Parameters**: Gain control, PPM correction, device selection
+- **Song Statistics Tracking**: Automatic logging of played songs with comprehensive analytics
+- **Traffic & Weather Maps**: Real-time traffic and weather radar maps from HD Radio data services
+- **Winamp-Style Visualizer**: Animated spectrum analyzer when no album art is available
+- **Station Logo Display**: Automatic station logo watermark on album art
+- **Sleep Prevention**: Keeps computer awake while playing radio
+- **Smart Cleanup**: Automatic cleanup of cached files after every 3 songs
 
 ## System Requirements
 
@@ -119,6 +125,33 @@ Required package:
 - **Save a preset**: Right-click on any P0-P3 button and select "Save current frequency" (includes HD channel selection)
 - **Load a preset**: Left-click on a preset button (restores both frequency and HD channel)
 - **Clear a preset**: Right-click and select "Clear preset"
+
+### Song Statistics
+
+**View your listening history and analytics**:
+```bash
+python boombox.py --stats
+```
+
+The statistics viewer shows:
+- **Recent Songs**: Last 20 songs played with timestamps
+- **Top Songs**: Most frequently played songs
+- **Top Artists**: Artists ranked by play count
+- **Stations**: All stations you've listened to
+- **Search**: Find songs in your history
+- **Time Analysis**: Hourly and daily listening patterns
+
+Songs are automatically logged while using the app. Station IDs and commercials are filtered out.
+
+### Traffic & Weather Maps
+
+![Traffic and Weather Map](https://raw.githubusercontent.com/sjhilt/SDR-BoomBox/refs/heads/main/resources/map_traffic_weather.png)
+
+- Click the **Map** button to open the traffic and weather viewer
+- Maps are automatically assembled from HD Radio data services
+- Traffic data shows real-time road conditions
+- Weather radar overlay displays precipitation
+- Maps update automatically when new data is broadcast
 
 ### System Tray
 
@@ -218,6 +251,18 @@ This project is released under the MIT License. See the source code for full lic
 - [PySide6](https://doc.qt.io/qtforpython/) - Qt GUI framework
 
 ## Changelog
+
+### Version 1.0.5
+- Added comprehensive song statistics tracking system
+- New statistics viewer GUI (`python boombox.py --stats`)
+- Automatic song logging with metadata (title, artist, album, station)
+- Traffic and weather map display from HD Radio data services
+- Winamp-style spectrum analyzer visualization
+- Station logo watermark display
+- Sleep prevention while playing
+- Smart cleanup after every 3 songs
+- Hide/show log toggle button
+- Various UI improvements and bug fixes
 
 ### Version 1.0.4
 - Added HD channel selection (HD1, HD2, HD3, HD4) with dropdown menu

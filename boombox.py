@@ -9,7 +9,7 @@ Author:     @sjhilt
 Project:    SDR-Boombox (Software Defined Radio Tuner)
 License:    MIT License
 Website:    https://github.com/sjhilt/SDR-Boombox
-Version:    1.0.2
+Version:    1.0.5
 Python:     3.10+
 
 Description:
@@ -32,6 +32,13 @@ import tempfile
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import random
+
+# Import stats module if available
+try:
+    from boombox_stats import StatsDatabase
+    STATS_ENABLED = True
+except ImportError:
+    STATS_ENABLED = False
 
 APP_NAME = "SDR-Boombox"
 FALLBACK_TIMEOUT_S = 6.0
@@ -382,6 +389,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
             QLabel#metaTitle { color: #f2f2f2; font-size: 16px; font-weight: 600; }
             QLabel#metaSubtitle { color: #b9b9b9; font-size: 13px; font-weight: 400; }
             QComboBox { background:#222; color:#eee; border:1px solid #444; border-radius:8px; padding:4px 8px;}
+            QCheckBox { color: #ffffff; }
+            QTabBar::tab { display: none; }
         """)
 
         # root
@@ -583,6 +592,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._last_artist = ""
         self._last_album = ""
         self._has_song_meta = False
+        self._last_logged_song = ""  # Track last logged song to avoid duplicates
         self._current_art_key = ""   # to avoid flicker
         self._has_album_art = False  # Track if we have real album art
         self._has_lot_art = False    # Track if LOT art is available in stream
@@ -966,6 +976,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
                         self._current_art_key = ""
                         # Try to fetch art
                         self._meta_debounce.start()
+                        
+                        # Log song to stats database
+                        self._log_song_to_stats()
 
         # Album (optional)
         m = self._album_re.search(line)
@@ -1724,6 +1737,46 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._append_log("[cleanup] ========== SMART CLEANUP TRIGGERED (3 songs played) ==========")
         self._periodic_cleanup()  # Use the same cleanup logic
     
+    def _log_song_to_stats(self):
+        """Log current song to statistics database"""
+        if not STATS_ENABLED:
+            return
+        
+        # Only log if we have valid song metadata
+        if not self._last_title or not self._last_artist:
+            return
+        
+        # Don't log station content
+        if self._looks_like_station(self._last_title) or self._looks_like_station(self._last_artist):
+            return
+        
+        # Create unique key for this song play
+        song_key = f"{self._last_artist}|{self._last_title}|{self._station_name}|{self._mhz()}"
+        
+        # Don't log the same song twice in a row (avoid duplicates from metadata updates)
+        if song_key == self._last_logged_song:
+            return
+        
+        self._last_logged_song = song_key
+        
+        try:
+            # Create stats database instance
+            stats_db = StatsDatabase()
+            
+            # Add song to database
+            stats_db.add_song(
+                title=self._last_title,
+                artist=self._last_artist,
+                station=self._station_name or f"{self._mhz():.1f} MHz",
+                frequency=self._mhz(),
+                album=self._last_album,
+                hd_channel=self.cfg.hd_program
+            )
+            
+            self._append_log(f"[stats] Logged song: {self._last_artist} - {self._last_title}")
+        except Exception as e:
+            self._append_log(f"[stats] Error logging song: {e}")
+    
     def _periodic_cleanup(self):
         """Periodic cleanup logic used by smart cleanup"""
         try:
@@ -1812,9 +1865,24 @@ class SDRBoombox(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    w = SDRBoombox(); w.show()
-    sys.exit(app.exec())
+    # Check for --stats flag
+    if "--stats" in sys.argv:
+        # Import and run stats viewer
+        try:
+            from boombox_stats import StatsViewer
+            app = QtWidgets.QApplication(sys.argv)
+            viewer = StatsViewer()
+            viewer.show()
+            sys.exit(app.exec())
+        except ImportError:
+            print("Error: boombox_stats.py not found. Please ensure it's in the same directory.")
+            sys.exit(1)
+    else:
+        # Normal boombox operation
+        app = QtWidgets.QApplication(sys.argv)
+        w = SDRBoombox()
+        w.show()
+        sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
