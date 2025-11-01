@@ -390,7 +390,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
             QLabel#metaSubtitle { color: #b9b9b9; font-size: 13px; font-weight: 400; }
             QComboBox { background:#222; color:#eee; border:1px solid #444; border-radius:8px; padding:4px 8px;}
             QCheckBox { color: #ffffff; }
-            QTabBar::tab { display: none; }
         """)
 
         # root
@@ -554,16 +553,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
         right.addStretch(1)
         grid.addLayout(right, 1, 1)
 
-        # tray icon - create simple text icon
-        tray_pm = QtGui.QPixmap(256, 256)
-        tray_pm.fill(QtCore.Qt.transparent)
-        painter = QtGui.QPainter(tray_pm)
-        painter.setPen(QtGui.QColor(255, 255, 255))
-        painter.setFont(QtGui.QFont("Arial", 72, QtGui.QFont.Bold))
-        painter.drawText(tray_pm.rect(), QtCore.Qt.AlignCenter, "SDR")
-        painter.end()
+        # tray icon - use radio emoji
         self._tray = QtWidgets.QSystemTrayIcon(self)
-        self._tray.setIcon(QtGui.QIcon(tray_pm))
+        self._tray.setIcon(QtGui.QIcon(emoji_pixmap("📻")))
         self._tray.setToolTip(APP_NAME)
         tray_menu = QtWidgets.QMenu()
         act_show = tray_menu.addAction("Show"); act_hide = tray_menu.addAction("Hide")
@@ -1737,6 +1729,97 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._append_log("[cleanup] ========== SMART CLEANUP TRIGGERED (3 songs played) ==========")
         self._periodic_cleanup()  # Use the same cleanup logic
     
+    def _periodic_cleanup(self):
+        """Periodic cleanup logic used by smart cleanup - more aggressive with map data"""
+        try:
+            if not LOT_FILES_DIR.exists():
+                self._append_log("[cleanup] LOT directory doesn't exist, skipping cleanup")
+                return
+            
+            # Get current time
+            current_time = time.time()
+            
+            # Count files before cleanup
+            all_files = list(LOT_FILES_DIR.glob("*"))
+            initial_count = len(all_files)
+            self._append_log(f"[cleanup] Starting cleanup - {initial_count} files in LOT directory")
+            
+            removed_count = 0
+            removed_files = []
+            preserved_files = set()
+            
+            # Identify files to preserve (only the most recent album art for current songs)
+            # Keep only the last 3 album art files
+            album_art_files = []
+            for file in all_files:
+                fname = file.name
+                # Skip map-related files
+                if any(x in fname for x in ['TMT_', 'TMI_', 'DWRO_', 'DWRI_']):
+                    continue
+                # Skip station logos
+                if '$$' in fname or 'SLWRXR' in fname:
+                    continue
+                # This is likely album art
+                if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                    album_art_files.append(file)
+            
+            # Sort album art by modification time and keep only the 3 most recent
+            album_art_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            for art_file in album_art_files[:3]:
+                preserved_files.add(art_file.name)
+                self._append_log(f"[cleanup] Preserving recent album art: {art_file.name}")
+            
+            # Preserve current station logo if set
+            if self._station_logo_file:
+                preserved_files.add(self._station_logo_file)
+                self._append_log(f"[cleanup] Preserving station logo: {self._station_logo_file}")
+            
+            # Clean up ALL map data files (traffic tiles, weather overlays, info files)
+            map_patterns = ['*TMT_*.png', '*TMI_*.txt', '*DWRO_*.png', '*DWRI_*.txt']
+            map_removed = 0
+            
+            for pattern in map_patterns:
+                for file in LOT_FILES_DIR.glob(pattern):
+                    try:
+                        file.unlink()
+                        map_removed += 1
+                        removed_files.append(f"{file.name} (map data)")
+                    except Exception as e:
+                        self._append_log(f"[cleanup] Error removing map file {file.name}: {e}")
+            
+            if map_removed > 0:
+                self._append_log(f"[cleanup] Removed {map_removed} map data files")
+            
+            # Clear map-related state variables
+            self._traffic_tiles.clear()
+            self._last_traffic_timestamp = ""
+            self._weather_overlay_file = ""
+            self._combined_map = None
+            self._map_has_data = False
+            
+            # Remove old album art files (keep only the 3 most recent)
+            for art_file in album_art_files[3:]:
+                if art_file.name not in preserved_files:
+                    try:
+                        art_file.unlink()
+                        removed_count += 1
+                        removed_files.append(f"{art_file.name} (old album art)")
+                    except Exception as e:
+                        self._append_log(f"[cleanup] Error removing {art_file.name}: {e}")
+            
+            # Final count
+            final_count = len(list(LOT_FILES_DIR.glob("*")))
+            total_removed = removed_count + map_removed
+            
+            if total_removed > 0:
+                self._append_log(f"[cleanup] Total files removed: {total_removed}")
+                self._append_log(f"[cleanup] Files remaining: {final_count} (was {initial_count})")
+            else:
+                self._append_log(f"[cleanup] No files removed, {final_count} files in directory")
+                
+        except Exception as e:
+            self._append_log(f"[cleanup] Error during periodic cleanup: {e}")
+    
     def _log_song_to_stats(self):
         """Log current song to statistics database"""
         if not STATS_ENABLED:
@@ -1777,77 +1860,6 @@ class SDRBoombox(QtWidgets.QMainWindow):
         except Exception as e:
             self._append_log(f"[stats] Error logging song: {e}")
     
-    def _periodic_cleanup(self):
-        """Periodic cleanup logic used by smart cleanup"""
-        try:
-            if not LOT_FILES_DIR.exists():
-                self._append_log("[cleanup] LOT directory doesn't exist, skipping cleanup")
-                return
-            
-            # Get current time
-            current_time = time.time()
-            cutoff_time = current_time - (20 * 60)  # Changed to 20 minutes for more aggressive cleanup
-            
-            # Count files before cleanup
-            all_files = list(LOT_FILES_DIR.glob("*"))
-            initial_count = len(all_files)
-            self._append_log(f"[cleanup] Starting cleanup - {initial_count} files in LOT directory")
-            
-            removed_count = 0
-            removed_files = []
-            preserved_tiles = set()
-            
-            # First, identify current traffic map tiles to preserve
-            if self._traffic_tiles:
-                for tile_path in self._traffic_tiles.values():
-                    preserved_tiles.add(Path(tile_path).name)
-                self._append_log(f"[cleanup] Preserving {len(preserved_tiles)} current traffic tiles")
-            
-            # Clean up old files
-            for file in LOT_FILES_DIR.glob("*"):
-                try:
-                    # Skip if it's part of current traffic map
-                    if file.name in preserved_tiles:
-                        continue
-                    
-                    # Skip if it's the current station logo
-                    if file.name == self._station_logo_file:
-                        continue
-                    
-                    # Skip current weather overlay
-                    if str(file) == self._weather_overlay_file:
-                        continue
-                    
-                    # Remove if older than 20 minutes
-                    file_age_minutes = (current_time - file.stat().st_mtime) / 60
-                    if file.stat().st_mtime < cutoff_time:
-                        file.unlink()
-                        removed_count += 1
-                        removed_files.append(f"{file.name} (age: {file_age_minutes:.1f} min)")
-                except Exception as e:
-                    self._append_log(f"[cleanup] Error removing {file.name}: {e}")
-            
-            if removed_count > 0:
-                self._append_log(f"[cleanup] Removed {removed_count} files older than 20 minutes")
-                # Log first few removed files for debugging
-                for rf in removed_files[:5]:
-                    self._append_log(f"[cleanup]   - {rf}")
-                if len(removed_files) > 5:
-                    self._append_log(f"[cleanup]   ... and {len(removed_files) - 5} more")
-            else:
-                self._append_log("[cleanup] No files old enough to remove")
-                
-            # Also do a size-based cleanup if directory is getting too large
-            remaining_files = list(LOT_FILES_DIR.glob("*"))
-            if len(remaining_files) > 100:  # Lowered threshold to 100 files
-                self._append_log(f"[cleanup] Directory has {len(remaining_files)} files, running size-based cleanup")
-                self._cleanup_lot_files(75)  # Keep only the most recent 75
-            
-            final_count = len(list(LOT_FILES_DIR.glob("*")))
-            self._append_log(f"[cleanup] Cleanup complete - {final_count} files remaining")
-                
-        except Exception as e:
-            self._append_log(f"[cleanup] Error during periodic cleanup: {e}")
     
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         try:
