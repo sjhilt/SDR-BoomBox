@@ -437,6 +437,8 @@ class StatsViewer(QtWidgets.QMainWindow):
     
     def refresh_stats(self):
         """Refresh all statistics displays"""
+        # Reload the database from disk to get latest data
+        self.db.data = self.db._load_database()
         stats = self.db.get_stats()
         
         # Update summary labels
