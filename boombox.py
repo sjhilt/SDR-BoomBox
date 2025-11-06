@@ -1531,18 +1531,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self.map_widget.setText("No map data available yet\n\nMaps will appear here when broadcast by the station")
     
     def _prevent_sleep(self, prevent: bool):
-        """Prevent or allow system sleep"""
+        """Prevent or allow system sleep (but allow screen saver)"""
         if sys.platform == "darwin":  # macOS
             if prevent:
                 if not self._caffeinate_process:
                     try:
-                        # Use caffeinate to prevent sleep
+                        # Use caffeinate with -i flag to prevent idle sleep only
+                        # This allows screen saver but prevents system sleep
                         self._caffeinate_process = subprocess.Popen(
-                            ["caffeinate", "-d", "-i"],
+                            ["caffeinate", "-i"],  # -i prevents idle sleep only
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL
                         )
-                        self._append_log("[system] Sleep prevention enabled")
+                        self._append_log("[system] Sleep prevention enabled (screen saver allowed)")
                     except Exception as e:
                         self._append_log(f"[system] Could not prevent sleep: {e}")
             else:
@@ -1560,9 +1561,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
         elif sys.platform == "win32":  # Windows
             import ctypes
             if prevent:
-                # Prevent sleep on Windows
-                ctypes.windll.kernel32.SetThreadExecutionState(0x80000002)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-                self._append_log("[system] Sleep prevention enabled")
+                # Prevent sleep on Windows (but allow screen saver)
+                # ES_CONTINUOUS | ES_SYSTEM_REQUIRED (no ES_DISPLAY_REQUIRED)
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED only
+                self._append_log("[system] Sleep prevention enabled (screen saver allowed)")
             else:
                 # Allow sleep on Windows
                 ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS
@@ -1570,14 +1572,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
         elif sys.platform.startswith("linux"):  # Linux
             if prevent:
                 try:
-                    # Try using systemd-inhibit
+                    # Try using systemd-inhibit - only inhibit sleep, not idle (allows screen saver)
                     self._caffeinate_process = subprocess.Popen(
-                        ["systemd-inhibit", "--what=idle:sleep", "--who=SDR-Boombox", 
+                        ["systemd-inhibit", "--what=sleep", "--who=SDR-Boombox", 
                          "--why=Playing radio", "sleep", "infinity"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL
                     )
-                    self._append_log("[system] Sleep prevention enabled")
+                    self._append_log("[system] Sleep prevention enabled (screen saver allowed)")
                 except Exception:
                     self._append_log("[system] Could not prevent sleep (systemd-inhibit not available)")
             else:
