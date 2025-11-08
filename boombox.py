@@ -541,6 +541,11 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.station_logo.hide()  # Initially hidden
         art_container_layout.addWidget(self.station_logo, 0, 0, QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight)
         
+        # Logo rotation timer - rotate every 60 seconds
+        self.logo_rotation_timer = QtCore.QTimer()
+        self.logo_rotation_timer.timeout.connect(self._rotate_station_logo)
+        self.logo_rotation_timer.setInterval(60000)  # 60 seconds
+        
         right.addWidget(art_container)
 
         self.meta_card = QtWidgets.QFrame(objectName="metaCard")
@@ -588,7 +593,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._current_art_key = ""   # to avoid flicker
         self._has_album_art = False  # Track if we have real album art
         self._has_lot_art = False    # Track if LOT art is available in stream
-        self._station_logo_file = ""  # Track current station logo file
+        self._station_logos = []  # List of all station logos received
+        self._current_logo_index = 0  # Current logo being displayed
         self._pending_lot_art = ""  # Store LOT art that arrives before metadata
         self._traffic_tiles = {}  # Store traffic map tiles
         self._last_traffic_timestamp = ""  # Track traffic map timestamp
@@ -767,8 +773,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._has_song_meta = False
         self._current_art_key = ""
         self._has_lot_art = False
-        self._station_logo_file = ""
+        self._station_logos = []  # Reset station logos list
+        self._current_logo_index = 0
         self._pending_lot_art = ""  # Reset pending art
+        self.logo_rotation_timer.stop()  # Stop logo rotation
         self._song_change_count = 0  # Reset song counter
         self._weather_overlay_file = ""  # Reset weather overlay
         self._combined_map = None  # Reset combined map
@@ -881,14 +889,30 @@ class SDRBoombox(QtWidgets.QMainWindow):
                             return
                         
                         if is_likely_logo:
-                            self._append_log(f"[art] Station logo detected (port {port}): {lot_file}")
-                            # Station logos should only be watermarks, never main art
-                            # Only use the first logo we receive for this station/channel
-                            self._handle_station_logo(lot_file)
+                            # Collect station logos for rotation display
+                            self._append_log(f"[art] Station/network logo detected (port {port}): {lot_file}")
+                            # Add to logos collection for rotation
+                            self._handle_station_logo(lot_file, port)
+                            return
                         else:
-                            # Regular album art - check if it matches XHDR pattern or is generic album art
+                            # Regular album art - but be more careful about what we accept
                             # Files like "7269_SD0037672425_1728995.jpg" are album art
-                            self._append_log(f"[art] Album art detected in HD Radio stream (port {port}): {lot_file}")
+                            self._append_log(f"[art] Potential album art detected (port {port}): {lot_file}")
+                            
+                            # Only accept art from the correct HD channel's port
+                            # HD1 typically uses port 0810, HD2 uses 1810, HD3 uses 5103, etc.
+                            expected_ports = {
+                                0: ['0810', '0010'],  # HD1
+                                1: ['1810', '0011'],  # HD2  
+                                2: ['5103', '0012'],  # HD3
+                                3: ['5104', '0013']   # HD4
+                            }
+                            
+                            current_hd = self.cfg.hd_program
+                            if current_hd in expected_ports:
+                                if port not in expected_ports[current_hd]:
+                                    self._append_log(f"[art] Ignoring art from wrong HD channel port {port} (expected {expected_ports[current_hd]} for HD{current_hd+1})")
+                                    return
                             
                             # Always try to load album art if we have song metadata
                             if self._last_title and self._last_artist and not (
@@ -1219,13 +1243,13 @@ class SDRBoombox(QtWidgets.QMainWindow):
         except Exception as e:
             self._append_log(f"[map] Error applying weather overlay: {e}")
     
-    def _handle_station_logo(self, logo_file: str):
-        """Handle station logo display as watermark - but only use the first one for this HD channel"""
-        # If we already have a station logo for this session, don't replace it
-        # This prevents HD3 logos from overwriting HD1 logos
-        if self._station_logo_file:
-            self._append_log(f"[art] Ignoring additional station logo (already have {self._station_logo_file}): {logo_file}")
-            return
+    def _handle_station_logo(self, logo_file: str, port: str = None):
+        """Handle station logo display - collect logos for rotation"""
+        # Check if we already have this logo
+        for existing_logo in self._station_logos:
+            if existing_logo['file'] == logo_file:
+                self._append_log(f"[art] Logo already in collection: {logo_file}")
+                return
             
         def try_load_logo(attempts=0):
             try:
@@ -1253,13 +1277,25 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     
                     pm = QtGui.QPixmap(str(logo_path))
                     if not pm.isNull():
-                        # Scale the logo to fit while maintaining aspect ratio (smaller for watermark)
-                        scaled_pm = pm.scaled(40, 40, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-                        self.station_logo.setPixmap(scaled_pm)
-                        self.station_logo.show()
-                        self.station_logo.raise_()  # Ensure it's on top
-                        self._station_logo_file = logo_file
-                        self._append_log(f"[art] Station logo watermark displayed: {logo_file}")
+                        # Add to logos collection
+                        logo_info = {
+                            'file': logo_file,
+                            'path': str(logo_path),
+                            'port': port,
+                            'pixmap': pm.scaled(40, 40, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                        }
+                        self._station_logos.append(logo_info)
+                        self._append_log(f"[art] Added logo to collection ({len(self._station_logos)} total): {logo_file}")
+                        
+                        # If this is the first logo, display it immediately
+                        if len(self._station_logos) == 1:
+                            self._display_logo(0)
+                            # Start rotation timer if we have multiple logos
+                            if len(self._station_logos) > 1:
+                                self.logo_rotation_timer.start()
+                        elif len(self._station_logos) == 2:
+                            # Just got a second logo, start rotation
+                            self.logo_rotation_timer.start()
                     else:
                         self._append_log(f"[art] Logo file exists but couldn't load as image: {logo_file}")
                 elif attempts < 5:
@@ -1272,6 +1308,28 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 self._append_log(f"[art] Error handling logo file {logo_file}: {e}")
         
         try_load_logo()
+    
+    def _display_logo(self, index: int):
+        """Display a specific logo from the collection"""
+        if 0 <= index < len(self._station_logos):
+            logo_info = self._station_logos[index]
+            self.station_logo.setPixmap(logo_info['pixmap'])
+            self.station_logo.show()
+            self.station_logo.raise_()  # Ensure it's on top
+            self._current_logo_index = index
+            
+            # Update tooltip to show which logo is displayed
+            port_info = f" (port {logo_info['port']})" if logo_info['port'] else ""
+            self.station_logo.setToolTip(f"Logo {index + 1}/{len(self._station_logos)}{port_info}")
+            self._append_log(f"[art] Displaying logo {index + 1}/{len(self._station_logos)}: {logo_info['file']}")
+    
+    def _rotate_station_logo(self):
+        """Rotate to the next station logo in the collection"""
+        if len(self._station_logos) > 1:
+            # Move to next logo
+            self._current_logo_index = (self._current_logo_index + 1) % len(self._station_logos)
+            self._display_logo(self._current_logo_index)
+            self._append_log(f"[art] Rotating to logo {self._current_logo_index + 1}/{len(self._station_logos)}")
     
     def _handle_lot_art(self, lot_file: str):
         """Handle album art from LOT (NRSC-5 HD Radio)"""
@@ -1868,10 +1926,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
                 preserved_files.add(art_file.name)
                 self._append_log(f"[cleanup] Preserving recent album art: {art_file.name}")
             
-            # Preserve current station logo if set
-            if self._station_logo_file:
-                preserved_files.add(self._station_logo_file)
-                self._append_log(f"[cleanup] Preserving station logo: {self._station_logo_file}")
+            # Preserve all station logos in collection
+            for logo_info in self._station_logos:
+                preserved_files.add(logo_info['file'])
+                self._append_log(f"[cleanup] Preserving station logo: {logo_info['file']}")
             
             # Clean up ALL map data files (traffic tiles, weather overlays, info files)
             map_patterns = ['*TMT_*.png', '*TMI_*.txt', '*DWRO_*.png', '*DWRI_*.txt']
