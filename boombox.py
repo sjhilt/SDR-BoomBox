@@ -759,6 +759,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # Only append to log if it exists
         if hasattr(self, 'log'):
             self.log.append(s)
+            # Auto-scroll to bottom to follow the last line
+            scrollbar = self.log.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
 
     # ----- playback buttons -----
     def _play_clicked(self):
