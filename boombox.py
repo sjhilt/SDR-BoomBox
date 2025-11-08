@@ -882,8 +882,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
                         
                         if is_likely_logo:
                             self._append_log(f"[art] Station logo detected (port {port}): {lot_file}")
-                            # Only handle station logo if it's for our current HD channel
-                            # HD1 = port 0810 or similar, HD3 = port 5103, etc.
+                            # Station logos should only be watermarks, never main art
+                            # Only use the first logo we receive for this station/channel
                             self._handle_station_logo(lot_file)
                         else:
                             # Regular album art - check if it matches XHDR pattern or is generic album art
@@ -1220,7 +1220,13 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._append_log(f"[map] Error applying weather overlay: {e}")
     
     def _handle_station_logo(self, logo_file: str):
-        """Handle station logo display as watermark"""
+        """Handle station logo display as watermark - but only use the first one for this HD channel"""
+        # If we already have a station logo for this session, don't replace it
+        # This prevents HD3 logos from overwriting HD1 logos
+        if self._station_logo_file:
+            self._append_log(f"[art] Ignoring additional station logo (already have {self._station_logo_file}): {logo_file}")
+            return
+            
         def try_load_logo(attempts=0):
             try:
                 # Try to load the logo file from our hidden directory
@@ -1265,9 +1271,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
             except Exception as e:
                 self._append_log(f"[art] Error handling logo file {logo_file}: {e}")
         
-        # Only update if it's a different logo
-        if logo_file != self._station_logo_file:
-            try_load_logo()
+        try_load_logo()
     
     def _handle_lot_art(self, lot_file: str):
         """Handle album art from LOT (NRSC-5 HD Radio)"""
