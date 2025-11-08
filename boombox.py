@@ -869,17 +869,26 @@ class SDRBoombox(QtWidgets.QMainWindow):
                         # Not a traffic/weather file, check if it's album art or station logo
                         # Check for station logo patterns
                         # Station logos often have patterns like: SLWRXR$$, or persist with same LOT ID
+                        # HD3 logos often come through port 0x5103 or have specific patterns
                         is_likely_logo = ('$$' in lot_file or 'SLWRXR' in lot_file or 
                                          '_logo' in lot_file.lower() or
+                                         port == '5103' or  # HD3 often uses this port for logos
                                          (lot_file.startswith('4655_') and '$$' in lot_file))
                         
+                        # Additional check: if we're on HD1 and this looks like it's from HD3, skip it
+                        if self.cfg.hd_program == 0 and port == '5103':
+                            self._append_log(f"[art] Ignoring HD3 logo while on HD1: {lot_file}")
+                            return
+                        
                         if is_likely_logo:
-                            self._append_log(f"[art] Station logo detected: {lot_file}")
+                            self._append_log(f"[art] Station logo detected (port {port}): {lot_file}")
+                            # Only handle station logo if it's for our current HD channel
+                            # HD1 = port 0810 or similar, HD3 = port 5103, etc.
                             self._handle_station_logo(lot_file)
                         else:
                             # Regular album art - check if it matches XHDR pattern or is generic album art
                             # Files like "7269_SD0037672425_1728995.jpg" are album art
-                            self._append_log(f"[art] Album art detected in HD Radio stream (LOT): {lot_file}")
+                            self._append_log(f"[art] Album art detected in HD Radio stream (port {port}): {lot_file}")
                             
                             # Always try to load album art if we have song metadata
                             if self._last_title and self._last_artist and not (
