@@ -482,7 +482,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         
         # Log tab with limited history
         self.log = QtWidgets.QTextEdit(readOnly=True)
-        self.log.setMaximumBlockCount(MAX_LOG_LINES)  # Limit log size
+        self.log_line_count = 0  # Track number of lines in log
         self.tabs.addTab(self.log, "Log")
         
         # Map window (initially None, created on demand)
@@ -579,6 +579,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # runtime objects
         self._load_presets()
         self._load_settings()  # Load settings including log visibility
+        self.log_line_count = 0  # Initialize log line counter
         self.worker = Worker(self.cfg)
         self.thread = QtCore.QThread(self); self.worker.moveToThread(self.thread); self.thread.start()
 
@@ -762,8 +763,22 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # Only append to log if it exists and protect against crashes
         try:
             if hasattr(self, 'log') and self.log:
-                # The setMaximumBlockCount will automatically remove old lines
+                # Implement rolling log by removing old lines when limit is reached
+                self.log_line_count += 1
+                
+                # If we've exceeded the max lines, remove the oldest lines
+                if self.log_line_count > MAX_LOG_LINES:
+                    # Get the current text
+                    cursor = self.log.textCursor()
+                    cursor.movePosition(QtGui.QTextCursor.Start)
+                    # Find and remove the first line
+                    cursor.movePosition(QtGui.QTextCursor.Down, QtGui.QTextCursor.KeepAnchor)
+                    cursor.removeSelectedText()
+                    self.log_line_count -= 1
+                
+                # Append the new line
                 self.log.append(s)
+                
                 # Auto-scroll to bottom to follow the last line
                 scrollbar = self.log.verticalScrollBar()
                 if scrollbar:
