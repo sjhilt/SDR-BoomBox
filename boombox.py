@@ -29,6 +29,7 @@ from urllib.parse import quote_plus
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 import tempfile
+from collections import deque
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import random
@@ -45,6 +46,7 @@ FALLBACK_TIMEOUT_S = 6.0
 PRESETS_PATH = Path.home() / ".sdr_boombox_presets.json"
 SETTINGS_PATH = Path.home() / ".sdr_boombox_settings.json"
 LOT_FILES_DIR = Path.home() / ".sdr_boombox_data"
+MAX_LOG_LINES = 1000  # Maximum lines to keep in log to prevent memory issues
 
 def which(cmd: str) -> str | None:
     p = shutil.which(cmd)
@@ -478,8 +480,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setFixedHeight(230)
         
-        # Log tab
+        # Log tab with limited history
         self.log = QtWidgets.QTextEdit(readOnly=True)
+        self.log.setMaximumBlockCount(MAX_LOG_LINES)  # Limit log size
         self.tabs.addTab(self.log, "Log")
         
         # Map window (initially None, created on demand)
@@ -756,12 +759,18 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._play_clicked()
 
     def _append_log(self, s: str):
-        # Only append to log if it exists
-        if hasattr(self, 'log'):
-            self.log.append(s)
-            # Auto-scroll to bottom to follow the last line
-            scrollbar = self.log.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+        # Only append to log if it exists and protect against crashes
+        try:
+            if hasattr(self, 'log') and self.log:
+                # The setMaximumBlockCount will automatically remove old lines
+                self.log.append(s)
+                # Auto-scroll to bottom to follow the last line
+                scrollbar = self.log.verticalScrollBar()
+                if scrollbar:
+                    scrollbar.setValue(scrollbar.maximum())
+        except Exception as e:
+            # Silently fail if log widget has issues
+            print(f"[Log Error] {e}: {s}")
 
     # ----- playback buttons -----
     def _play_clicked(self):
@@ -851,6 +860,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
     # ----- metadata/log parsing -----
     def _handle_log_line(self, s: str):
+        # Protect against very long log lines that could cause memory issues
+        if len(s) > 5000:
+            s = s[:5000] + "... [truncated]"
+        
         self._append_log(s)
         line = self._ts_re.sub("", s).strip()
         
