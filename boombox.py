@@ -225,9 +225,12 @@ class Worker(QtCore.QObject):
         self._stop_evt = threading.Event()
 
     # ---------- command builders ----------
-    def ffplay_cmd(self, is_fm: bool) -> list[str]:
+    def ffplay_cmd(self, is_fm: bool, muted: bool = False) -> list[str]:
         # Match your working CLI exactly for analog; HD stays raw pipe to ffplay
         base = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "warning"]
+        # Add volume control for muting (0 = muted, 1 = normal)
+        if muted:
+            base += ["-volume", "0"]
         if is_fm:
             base += ["-f", "s16le", "-ar", "48000", "-i", "-"]
         else:
@@ -378,12 +381,12 @@ class Worker(QtCore.QObject):
             pass  # Object might be deleted
 
     @QtCore.Slot()
-    def start_hd(self):
+    def start_hd(self, muted: bool = False):
         self.stop()
         self._stop_evt.clear()
         self._mode = "hd"
         try:
-            self._ffplay = subprocess.Popen(self.ffplay_cmd(is_fm=False), stdin=subprocess.PIPE,
+            self._ffplay = subprocess.Popen(self.ffplay_cmd(is_fm=False, muted=muted), stdin=subprocess.PIPE,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self._nrsc5 = subprocess.Popen(self.nrsc5_cmd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             self._pipe_forward(self._nrsc5.stdout, self._ffplay.stdin)
@@ -399,12 +402,12 @@ class Worker(QtCore.QObject):
             self.stop()
 
     @QtCore.Slot()
-    def start_fm(self):
+    def start_fm(self, muted: bool = False):
         self.stop()
         self._stop_evt.clear()
         self._mode = "fm"
         try:
-            self._ffplay = subprocess.Popen(self.ffplay_cmd(is_fm=True), stdin=subprocess.PIPE,
+            self._ffplay = subprocess.Popen(self.ffplay_cmd(is_fm=True, muted=muted), stdin=subprocess.PIPE,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self._fm = subprocess.Popen(self.rtl_fm_cmd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             self._pipe_forward(self._fm.stdout, self._ffplay.stdin)
@@ -496,13 +499,20 @@ class SDRBoombox(QtWidgets.QMainWindow):
             pres_row.addWidget(b)
         left.addLayout(pres_row)
 
-        # play/stop + fallback
+        # play/stop + mute + fallback
         row2 = QtWidgets.QHBoxLayout()
         self.btn_play = QtWidgets.QPushButton("Play")
         self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_mute = QtWidgets.QPushButton("🔊")  # Speaker icon
+        self.btn_mute.setCheckable(True)
+        self.btn_mute.setMaximumWidth(40)
+        self.btn_mute.setToolTip("Mute/Unmute audio (receiver keeps running)")
         self.chk_fallback = QtWidgets.QCheckBox("Auto analog fallback")
         self.chk_fallback.setChecked(True)
-        row2.addWidget(self.btn_play); row2.addWidget(self.btn_stop); row2.addWidget(self.chk_fallback)
+        row2.addWidget(self.btn_play)
+        row2.addWidget(self.btn_stop)
+        row2.addWidget(self.btn_mute)
+        row2.addWidget(self.chk_fallback)
         left.addLayout(row2)
         
         # HD program selector (HD1, HD2, etc.) and log toggle
@@ -669,6 +679,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # signals
         self.btn_play.clicked.connect(self._play_clicked)
         self.btn_stop.clicked.connect(self._stop_clicked)
+        self.btn_mute.clicked.connect(self._toggle_mute)
         self.worker.logLine.connect(self._handle_log_line)
         self.worker.started.connect(self._on_started)
         self.worker.stopped.connect(self._on_stopped)
@@ -814,6 +825,28 @@ class SDRBoombox(QtWidgets.QMainWindow):
         if hasattr(self, 'worker') and self.worker._mode == "hd":
             self._append_log(f"[hd] Switching to HD{index + 1}")
             self._play_clicked()
+    
+    def _toggle_mute(self):
+        """Toggle mute state"""
+        is_muted = self.btn_mute.isChecked()
+        
+        # Update button appearance
+        if is_muted:
+            self.btn_mute.setText("🔇")  # Muted speaker icon
+            self._append_log("[audio] Muted")
+        else:
+            self.btn_mute.setText("🔊")  # Speaker icon
+            self._append_log("[audio] Unmuted")
+        
+        # If currently playing, restart with new mute state
+        if hasattr(self, 'worker') and self.worker._mode:
+            current_mode = self.worker._mode
+            if current_mode == "hd":
+                QtCore.QMetaObject.invokeMethod(self.worker, "start_hd", QtCore.Qt.QueuedConnection,
+                                               QtCore.Q_ARG(bool, is_muted))
+            elif current_mode == "fm":
+                QtCore.QMetaObject.invokeMethod(self.worker, "start_fm", QtCore.Qt.QueuedConnection,
+                                               QtCore.Q_ARG(bool, is_muted))
 
     def _append_log(self, s: str):
         # Only append to log if it exists and protect against crashes
@@ -902,7 +935,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._has_album_art = False
         
         self.btn_play.setEnabled(False)
-        QtCore.QMetaObject.invokeMethod(self.worker, "start_hd")
+        # Pass mute state to worker
+        is_muted = self.btn_mute.isChecked()
+        QtCore.QMetaObject.invokeMethod(self.worker, "start_hd", QtCore.Qt.QueuedConnection, 
+                                       QtCore.Q_ARG(bool, is_muted))
         if self.chk_fallback.isChecked() and which("rtl_fm"):
             self._fallback_timer.start(int(FALLBACK_TIMEOUT_S * 1000))
         else:
@@ -949,7 +985,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._append_log(f"[fallback] no HD sync in {FALLBACK_TIMEOUT_S:.0f}s, switching to analog FM")
         self.meta_title.setText("SDR-Boombox (Analog FM Mode)")
         self.meta_sub.setText("by @sjhilt")
-        QtCore.QMetaObject.invokeMethod(self.worker, "start_fm")
+        # Pass mute state to worker
+        is_muted = self.btn_mute.isChecked()
+        QtCore.QMetaObject.invokeMethod(self.worker, "start_fm", QtCore.Qt.QueuedConnection,
+                                       QtCore.Q_ARG(bool, is_muted))
 
     # ----- metadata/log parsing -----
     @QtCore.Slot(str)
