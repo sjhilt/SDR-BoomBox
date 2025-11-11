@@ -1444,7 +1444,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # More specific patterns for actual station IDs and promos
         bad_phrases = ["commercial", "advertisement", "promo", "jingle", "weather", "traffic",
                       "coming up", "you're listening", "stay tuned", "call us", "text us", "win", 
-                      "contest", "hd1", "hd2", "station id", "station identification", "#1"]
+                      "contest", "hd1", "hd2", "hd3", "hd4", "station id", "station identification", 
+                      "#1"]
         
         # Check for exact phrase matches
         for phrase in bad_phrases:
