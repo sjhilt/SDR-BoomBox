@@ -478,11 +478,51 @@ class SDRBoombox(QtWidgets.QMainWindow):
         # state (cfg before slider!)
         self.cfg = Cfg(mhz=default_freq, gain=40.0, ppm=5)
 
-        # LCD
+        # Enhanced display with frequency and station name
+        display_widget = QtWidgets.QWidget()
+        display_widget.setStyleSheet("""
+            QWidget { 
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0f0f0f, stop:1 #0a0a0a);
+                border: 2px solid #2a2a2a;
+                border-radius: 15px;
+            }
+        """)
+        display_layout = QtWidgets.QVBoxLayout(display_widget)
+        display_layout.setContentsMargins(15, 10, 15, 10)
+        display_layout.setSpacing(5)
+        
+        # Frequency display (larger, primary)
         self.lcd = QtWidgets.QLabel("—.— MHz", objectName="lcd")
-        f = self.lcd.font(); f.setPointSize(22); self.lcd.setFont(f)
+        f = self.lcd.font(); f.setPointSize(28); f.setWeight(QtGui.QFont.Bold); self.lcd.setFont(f)
         self.lcd.setAlignment(QtCore.Qt.AlignCenter)
-        grid.addWidget(self.lcd, 0, 0, 1, 2)
+        self.lcd.setStyleSheet("""
+            QLabel {
+                color: #7CFC00;
+                background: transparent;
+                padding: 5px;
+                letter-spacing: 2px;
+            }
+        """)
+        display_layout.addWidget(self.lcd)
+        
+        # Station name display (smaller, secondary)
+        self.station_display = QtWidgets.QLabel("Tuning...", objectName="station_display")
+        station_font = self.station_display.font()
+        station_font.setPointSize(16)
+        self.station_display.setFont(station_font)
+        self.station_display.setAlignment(QtCore.Qt.AlignCenter)
+        self.station_display.setStyleSheet("""
+            QLabel {
+                color: #b9b9b9;
+                background: transparent;
+                padding: 2px;
+                font-weight: 500;
+            }
+        """)
+        display_layout.addWidget(self.station_display)
+        
+        grid.addWidget(display_widget, 0, 0, 1, 2)
 
         # left controls
         left = QtWidgets.QVBoxLayout()
@@ -828,6 +868,37 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _update_lcd(self):
         hd_text = f" HD{self.cfg.hd_program + 1}" if hasattr(self, 'cfg') else ""
         self.lcd.setText(f"{self._mhz():.1f} MHz{hd_text}")
+        
+        # Update station display if we have a station name
+        if hasattr(self, '_station_name') and self._station_name:
+            self.station_display.setText(self._station_name)
+            self.station_display.setStyleSheet("""
+                QLabel {
+                    color: #ffffff;
+                    background: transparent;
+                    padding: 2px;
+                    font-weight: 600;
+                }
+            """)
+        else:
+            # Show status or default text
+            if hasattr(self, 'worker') and self.worker._mode == "hd":
+                if hasattr(self, '_hd_synced') and self._hd_synced:
+                    self.station_display.setText("HD Radio")
+                else:
+                    self.station_display.setText("Tuning HD...")
+            elif hasattr(self, 'worker') and self.worker._mode == "fm":
+                self.station_display.setText("Analog FM")
+            else:
+                self.station_display.setText("Ready")
+            self.station_display.setStyleSheet("""
+                QLabel {
+                    color: #b9b9b9;
+                    background: transparent;
+                    padding: 2px;
+                    font-weight: 500;
+                }
+            """)
     
     def _on_hd_program_changed(self, index: int):
         """Handle HD program selection change"""
@@ -942,6 +1013,15 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._load_existing_map_data()
         
         # Reset UI displays
+        self.station_display.setText("Tuning HD...")
+        self.station_display.setStyleSheet("""
+            QLabel {
+                color: #ffcc00;
+                background: transparent;
+                padding: 2px;
+                font-weight: 500;
+            }
+        """)
         self.meta_title.setText(f"{self._mhz():.1f} MHz")
         self.meta_sub.setText("Tuning...")
         # Start with visualizer while tuning
@@ -968,10 +1048,14 @@ class SDRBoombox(QtWidgets.QMainWindow):
     # ----- worker callbacks -----
     def _on_started(self, mode: str):
         self._append_log(f"[audio] started ({mode})")
-        # Update LCD to show playing status
-        current_text = self.lcd.text()
-        if " [PLAYING]" not in current_text:
-            self.lcd.setText(current_text + " [PLAYING]")
+        # Update displays
+        self._update_lcd()
+        # Add playing indicator
+        if mode == "hd":
+            self.station_display.setText("Tuning HD..." if not self._hd_synced else 
+                                       (self._station_name if self._station_name else "HD Radio"))
+        else:
+            self.station_display.setText(self._station_name if self._station_name else "Analog FM")
         # Start visualizer animation
         self.visualizer.set_playing(True)
         # Prevent sleep while playing
@@ -979,8 +1063,17 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
     def _on_stopped(self, rc: int, mode: str):
         self._append_log(f"[audio] stopped rc={rc} ({mode})")
-        # Remove playing status from LCD
-        self.lcd.setText(self.lcd.text().replace(" [PLAYING]", ""))
+        # Update displays
+        self._update_lcd()
+        self.station_display.setText("Stopped")
+        self.station_display.setStyleSheet("""
+            QLabel {
+                color: #808080;
+                background: transparent;
+                padding: 2px;
+                font-weight: 500;
+            }
+        """)
         self.btn_play.setEnabled(True)
         # Stop visualizer animation
         self.visualizer.set_playing(False)
@@ -992,11 +1085,32 @@ class SDRBoombox(QtWidgets.QMainWindow):
         if self._fallback_timer.isActive():
             self._fallback_timer.stop()
         self._append_log("[hd] synchronized; staying on digital")
+        # Update station display to show HD is synced
+        if not self._station_name:
+            self.station_display.setText("HD Radio")
+            self.station_display.setStyleSheet("""
+                QLabel {
+                    color: #7CFC00;
+                    background: transparent;
+                    padding: 2px;
+                    font-weight: 600;
+                }
+            """)
 
     def _maybe_fallback_to_fm(self):
         if self._hd_synced:
             return
         self._append_log(f"[fallback] no HD sync in {FALLBACK_TIMEOUT_S:.0f}s, switching to analog FM")
+        # Update station display for analog mode
+        self.station_display.setText("Analog FM")
+        self.station_display.setStyleSheet("""
+            QLabel {
+                color: #ffaa00;
+                background: transparent;
+                padding: 2px;
+                font-weight: 500;
+            }
+        """)
         self.meta_title.setText("SDR-Boombox (Analog FM Mode)")
         self.meta_sub.setText("by @sjhilt")
         # Pass mute state to worker
@@ -1118,7 +1232,17 @@ class SDRBoombox(QtWidgets.QMainWindow):
         m = self._station_re.search(line)
         if m:
             self._station_name = m.group(1).strip()
-            # Only show station name if we don't have a song title
+            # Update the station display immediately
+            self.station_display.setText(self._station_name)
+            self.station_display.setStyleSheet("""
+                QLabel {
+                    color: #ffffff;
+                    background: transparent;
+                    padding: 2px;
+                    font-weight: 600;
+                }
+            """)
+            # Only show station name in metadata if we don't have a song title
             if not self._last_title or self._looks_like_station(self._last_title):
                 self.meta_title.setText(self._station_name)
 
