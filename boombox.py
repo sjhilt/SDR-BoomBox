@@ -492,16 +492,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
         display_layout.setContentsMargins(15, 10, 15, 10)
         display_layout.setSpacing(5)
         
-        # Frequency display (larger, primary)
+        # Frequency display (larger, primary) - using LCD font
         self.lcd = QtWidgets.QLabel("—.— MHz", objectName="lcd")
-        f = self.lcd.font(); f.setPointSize(28); f.setWeight(QtGui.QFont.Bold); self.lcd.setFont(f)
+        lcd_font = QtGui.QFont('DS-Digital', 32)  # LCD-style font
+        lcd_font.setWeight(QtGui.QFont.Bold)
+        self.lcd.setFont(lcd_font)
         self.lcd.setAlignment(QtCore.Qt.AlignCenter)
         self.lcd.setStyleSheet("""
             QLabel {
+                font-family: 'DS-Digital', monospace;
                 color: #7CFC00;
                 background: transparent;
                 padding: 5px;
-                letter-spacing: 2px;
+                letter-spacing: 3px;
             }
         """)
         display_layout.addWidget(self.lcd)
