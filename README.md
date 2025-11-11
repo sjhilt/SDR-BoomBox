@@ -15,6 +15,7 @@ A modern GUI-driven HD Radio (NRSC-5) and analog FM receiver for Software Define
 - **HD Channel Selection**: Toggle between different HD subchannels (HD1, HD2, HD3, HD4) for stations that broadcast multiple programs
 - **Automatic Analog Fallback**: Seamlessly switches to wideband FM when HD signal is unavailable (6-second timeout)
 - **Frequency Range**: 88.0 - 108.0 MHz with 0.1 MHz precision tuning
+- **Mute Button**: Instantly mute/unmute audio while keeping the receiver running (no re-tuning delay)
 
 ### User Interface
 - **Retro Digital Display**: LCD-style frequency display with play/pause indicators
@@ -116,9 +117,14 @@ Required package:
    - Or click a preset button to jump to a saved frequency
 
 3. **Start playback**:
-   - Click the "▶ Play" button
+   - Click the "Play" button
    - The app will attempt HD Radio first, then fall back to analog FM if needed
    - Select HD channel (HD1-HD4) using the dropdown menu to access different programs on the same frequency
+
+4. **Audio controls**:
+   - Click the speaker icon (🔊) to mute/unmute audio
+   - When muted, shows 🔇 and the receiver keeps running
+   - Unmuting is instant with no re-tuning delay
 
 ### Preset Management
 
@@ -195,6 +201,11 @@ RTL-SDR → nrsc5 → stdout (PCM) → ffplay
 RTL-SDR → rtl_fm (WBFM) → stdout (S16LE) → ffplay
 ```
 
+**Mute Implementation**:
+- Uses ffplay's `-volume 0` parameter to silence audio
+- Keeps nrsc5/rtl_fm decoder running for instant unmute
+- No signal loss or re-tuning required when toggling mute
+
 ### Metadata Parsing
 
 The app parses nrsc5 stderr output for:
@@ -251,6 +262,15 @@ This project is released under the MIT License. See the source code for full lic
 - [PySide6](https://doc.qt.io/qtforpython/) - Qt GUI framework
 
 ## Changelog
+
+### Version 1.0.6
+- **Added mute button functionality**: Instantly mute/unmute without stopping the receiver
+- **Improved stability**: Enhanced error handling to prevent crashes
+- **Thread-safe logging**: Fixed potential crashes from concurrent log access
+- **Better subprocess cleanup**: Proper termination of audio processes
+- **Network timeout protection**: Added timeouts for iTunes API calls
+- **Memory management**: Limited log size to prevent memory issues
+- **Code documentation**: Added human-readable comments throughout
 
 ### Version 1.0.5
 - Added comprehensive song statistics tracking system

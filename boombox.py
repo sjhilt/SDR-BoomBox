@@ -269,22 +269,26 @@ class Worker(QtCore.QObject):
 
     # ---------- helpers ----------
     def _pipe_forward(self, src, dst):
+        """Forward audio data from decoder to player in a separate thread"""
         def run():
             try:
+                # Keep forwarding audio chunks until stopped
                 while not self._stop_evt.is_set():
-                    chunk = src.read(8192)
-                    if not chunk: break
+                    chunk = src.read(8192)  # Read 8KB chunks for smooth playback
+                    if not chunk: break  # End of stream
+                    
+                    # Write to destination if pipe is still open
                     if dst and not dst.closed:
                         try:
                             dst.write(chunk)
                             dst.flush()
                         except (BrokenPipeError, OSError):
-                            # Pipe closed, stop forwarding
+                            # Player closed the pipe, stop forwarding
                             break
             except Exception:
-                pass
+                pass  # Silently handle pipe errors during shutdown
             finally:
-                # Clean up pipes
+                # Clean up both pipes when done
                 for pipe in [src, dst]:
                     if pipe and not pipe.closed:
                         try:
@@ -322,9 +326,10 @@ class Worker(QtCore.QObject):
         threading.Thread(target=run, daemon=True, name="stderr-reader").start()
 
     def _terminate(self, p: subprocess.Popen | None):
+        """Safely terminate a subprocess with proper cleanup"""
         if not p: return
         try:
-            # Close pipes first to prevent blocking
+            # Close all pipes first to prevent blocking on I/O
             for pipe in [p.stdin, p.stdout, p.stderr]:
                 if pipe:
                     try:
@@ -332,18 +337,20 @@ class Worker(QtCore.QObject):
                     except:
                         pass
             
-            if p.poll() is None:
-                p.terminate()
+            # Try graceful termination first
+            if p.poll() is None:  # Process still running
+                p.terminate()  # Send SIGTERM
                 try: 
-                    p.wait(timeout=1.25)
+                    p.wait(timeout=1.25)  # Give it time to exit cleanly
                 except subprocess.TimeoutExpired: 
+                    # Force kill if it didn't respond to terminate
                     try:
-                        p.kill()
+                        p.kill()  # Send SIGKILL
                         p.wait(timeout=0.5)
                     except:
-                        pass  # Process might be gone already
+                        pass  # Process might have already exited
         except Exception:
-            pass
+            pass  # Ignore errors during cleanup
 
     # ---------- slots ----------
     @QtCore.Slot()
@@ -499,16 +506,21 @@ class SDRBoombox(QtWidgets.QMainWindow):
             pres_row.addWidget(b)
         left.addLayout(pres_row)
 
-        # play/stop + mute + fallback
+        # Control buttons row: play, stop, mute, and fallback option
         row2 = QtWidgets.QHBoxLayout()
         self.btn_play = QtWidgets.QPushButton("Play")
         self.btn_stop = QtWidgets.QPushButton("Stop")
+        
+        # Mute button - toggles audio output without stopping the receiver
         self.btn_mute = QtWidgets.QPushButton("🔊")  # Speaker icon
-        self.btn_mute.setCheckable(True)
+        self.btn_mute.setCheckable(True)  # Toggle button
         self.btn_mute.setMaximumWidth(40)
         self.btn_mute.setToolTip("Mute/Unmute audio (receiver keeps running)")
+        
+        # Auto-fallback checkbox for switching to analog when HD fails
         self.chk_fallback = QtWidgets.QCheckBox("Auto analog fallback")
         self.chk_fallback.setChecked(True)
+        
         row2.addWidget(self.btn_play)
         row2.addWidget(self.btn_stop)
         row2.addWidget(self.btn_mute)
@@ -827,18 +839,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
             self._play_clicked()
     
     def _toggle_mute(self):
-        """Toggle mute state"""
+        """Toggle mute state - keeps receiver running but silences audio output"""
         is_muted = self.btn_mute.isChecked()
         
-        # Update button appearance
+        # Switch between speaker and muted speaker emoji based on state
         if is_muted:
             self.btn_mute.setText("🔇")  # Muted speaker icon
             self._append_log("[audio] Muted")
         else:
-            self.btn_mute.setText("🔊")  # Speaker icon
+            self.btn_mute.setText("🔊")  # Speaker icon  
             self._append_log("[audio] Unmuted")
         
-        # If currently playing, restart with new mute state
+        # Restart audio pipeline with new volume setting while keeping decoder running
+        # This allows instant unmuting without re-tuning or losing signal
         if hasattr(self, 'worker') and self.worker._mode:
             current_mode = self.worker._mode
             if current_mode == "hd":
@@ -849,36 +862,37 @@ class SDRBoombox(QtWidgets.QMainWindow):
                                                QtCore.Q_ARG(bool, is_muted))
 
     def _append_log(self, s: str):
-        # Only append to log if it exists and protect against crashes
+        """Safely append text to the log widget with crash protection"""
         try:
+            # Check if log widget still exists (might be deleted during shutdown)
             if not hasattr(self, 'log') or not self.log:
                 return
                 
-            # Protect against extremely long strings that could cause memory issues
+            # Truncate extremely long lines to prevent memory issues
             if len(s) > 5000:
                 s = s[:5000] + "... [truncated]"
             
-            # Use invokeMethod to ensure thread safety
+            # Use Qt's thread-safe method invocation to append from any thread
             QtCore.QMetaObject.invokeMethod(self.log, "append", 
                                            QtCore.Qt.QueuedConnection,
                                            QtCore.Q_ARG(str, s))
             
-            # Implement rolling log more efficiently
+            # Keep track of log size and trim when it gets too large
             if hasattr(self, 'log_line_count'):
                 self.log_line_count += 1
                 if self.log_line_count > MAX_LOG_LINES:
-                    # Clear old content periodically
+                    # Schedule log trimming on main thread
                     QtCore.QMetaObject.invokeMethod(self, "_trim_log", QtCore.Qt.QueuedConnection)
                     
         except RuntimeError:
-            # Widget was deleted, ignore
+            # Widget was deleted during shutdown - safe to ignore
             pass
         except Exception as e:
-            # Silently fail if log widget has issues
+            # Fallback to console if log widget has issues
             try:
                 print(f"[Log Error] {e}: {s[:100]}")
             except:
-                pass  # Even printing might fail
+                pass  # Even console printing might fail during shutdown
     
     @QtCore.Slot()
     def _trim_log(self):
