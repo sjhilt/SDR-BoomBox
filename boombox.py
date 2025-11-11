@@ -607,7 +607,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self._map_has_data = False  # Track if map has data to show
         self._song_change_count = 0  # Track song changes for cleanup
         self._meta_debounce = QtCore.QTimer(self); self._meta_debounce.setSingleShot(True)
-        self._meta_debounce.setInterval(350)  # ms
+        self._meta_debounce.setInterval(2500)  # Increased from 350ms to 2.5 seconds to allow LOT art time to load
         self._meta_debounce.timeout.connect(self._maybe_fetch_art)
 
         # signals
@@ -960,10 +960,10 @@ class SDRBoombox(QtWidgets.QMainWindow):
                                 # Store it temporarily in case metadata comes after the art
                                 self._append_log(f"[art] Storing art file for potential use: {lot_file}")
                                 self._pending_lot_art = lot_file
-                                # Set multiple timers to check for metadata
-                                QtCore.QTimer.singleShot(500, lambda: self._check_pending_art())
-                                QtCore.QTimer.singleShot(1500, lambda: self._check_pending_art())
-                                QtCore.QTimer.singleShot(3000, lambda: self._check_pending_art())
+                                # Set multiple timers to check for metadata - increased delays to be more patient
+                                QtCore.QTimer.singleShot(1000, lambda: self._check_pending_art())  # 1 second
+                                QtCore.QTimer.singleShot(3000, lambda: self._check_pending_art())  # 3 seconds
+                                QtCore.QTimer.singleShot(5000, lambda: self._check_pending_art())  # 5 seconds
                 elif lot_file.lower().endswith('.txt'):
                     # Skip text files - we're focusing on visual maps only
                     if 'TMI_' in lot_file:
