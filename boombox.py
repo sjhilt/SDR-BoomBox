@@ -380,7 +380,7 @@ class Worker(QtCore.QObject):
         except RuntimeError:
             pass  # Object might be deleted
 
-    @QtCore.Slot()
+    @QtCore.Slot(bool)
     def start_hd(self, muted: bool = False):
         self.stop()
         self._stop_evt.clear()
@@ -401,7 +401,7 @@ class Worker(QtCore.QObject):
             self.logLine.emit(f"Missing executable: {e}")
             self.stop()
 
-    @QtCore.Slot()
+    @QtCore.Slot(bool)
     def start_fm(self, muted: bool = False):
         self.stop()
         self._stop_evt.clear()
