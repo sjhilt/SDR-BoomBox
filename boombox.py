@@ -271,20 +271,49 @@ class Worker(QtCore.QObject):
                 while not self._stop_evt.is_set():
                     chunk = src.read(8192)
                     if not chunk: break
-                    if dst:
-                        dst.write(chunk); dst.flush()
+                    if dst and not dst.closed:
+                        try:
+                            dst.write(chunk)
+                            dst.flush()
+                        except (BrokenPipeError, OSError):
+                            # Pipe closed, stop forwarding
+                            break
             except Exception:
                 pass
+            finally:
+                # Clean up pipes
+                for pipe in [src, dst]:
+                    if pipe and not pipe.closed:
+                        try:
+                            pipe.close()
+                        except:
+                            pass
         threading.Thread(target=run, daemon=True, name="pipe-forward").start()
 
     def _stderr_reader(self, proc, prefix="", on_line=None):
         def run():
             try:
+                if not proc or not proc.stderr:
+                    return
+                    
                 for line in iter(proc.stderr.readline, b""):
-                    if self._stop_evt.is_set(): break
-                    s = line.decode("utf-8", "ignore").rstrip()
-                    self.logLine.emit(prefix + s)
-                    if on_line: on_line(s)
+                    if self._stop_evt.is_set(): 
+                        break
+                    if not line:  # EOF
+                        break
+                    try:
+                        s = line.decode("utf-8", "ignore").rstrip()
+                        # Protect against extremely long lines
+                        if len(s) > 5000:
+                            s = s[:5000] + "... [truncated]"
+                        self.logLine.emit(prefix + s)
+                        if on_line: 
+                            on_line(s)
+                    except:
+                        pass  # Ignore decode errors
+            except (ValueError, OSError):
+                # Pipe closed or process terminated
+                pass
             except Exception:
                 pass
         threading.Thread(target=run, daemon=True, name="stderr-reader").start()
@@ -292,10 +321,24 @@ class Worker(QtCore.QObject):
     def _terminate(self, p: subprocess.Popen | None):
         if not p: return
         try:
+            # Close pipes first to prevent blocking
+            for pipe in [p.stdin, p.stdout, p.stderr]:
+                if pipe:
+                    try:
+                        pipe.close()
+                    except:
+                        pass
+            
             if p.poll() is None:
                 p.terminate()
-                try: p.wait(timeout=1.25)
-                except subprocess.TimeoutExpired: p.kill()
+                try: 
+                    p.wait(timeout=1.25)
+                except subprocess.TimeoutExpired: 
+                    try:
+                        p.kill()
+                        p.wait(timeout=0.5)
+                    except:
+                        pass  # Process might be gone already
         except Exception:
             pass
 
@@ -303,23 +346,36 @@ class Worker(QtCore.QObject):
     @QtCore.Slot()
     def stop(self):
         self._stop_evt.set()
-        self._terminate(self._nrsc5); self._nrsc5 = None
-        self._terminate(self._fm); self._fm = None
+        
+        # Give threads a moment to notice the stop event
+        time.sleep(0.1)
+        
+        # Terminate processes in order
+        for proc in [self._nrsc5, self._fm, self._ffplay]:
+            if proc:
+                self._terminate(proc)
+        
+        # Clear references
+        self._nrsc5 = None
+        self._fm = None
+        
+        # Get return code before clearing ffplay
+        rc = 0
         if self._ffplay:
             try:
-                if self._ffplay.stdin:
-                    try: self._ffplay.stdin.close()
-                    except Exception: pass
-                if self._ffplay.poll() is None:
-                    self._ffplay.terminate()
-                    try: self._ffplay.wait(timeout=1.0)
-                    except subprocess.TimeoutExpired: self._ffplay.kill()
-            except Exception: pass
-        rc = self._ffplay.returncode if self._ffplay else 0
+                rc = self._ffplay.returncode or 0
+            except:
+                rc = 0
+        
         mode = self._mode or ""
         self._ffplay = None
         self._mode = None
-        self.stopped.emit(rc or 0, mode)
+        
+        # Emit stopped signal
+        try:
+            self.stopped.emit(rc, mode)
+        except RuntimeError:
+            pass  # Object might be deleted
 
     @QtCore.Slot()
     def start_hd(self):
@@ -762,30 +818,52 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def _append_log(self, s: str):
         # Only append to log if it exists and protect against crashes
         try:
-            if hasattr(self, 'log') and self.log:
-                # Implement rolling log by removing old lines when limit is reached
+            if not hasattr(self, 'log') or not self.log:
+                return
+                
+            # Protect against extremely long strings that could cause memory issues
+            if len(s) > 5000:
+                s = s[:5000] + "... [truncated]"
+            
+            # Use invokeMethod to ensure thread safety
+            QtCore.QMetaObject.invokeMethod(self.log, "append", 
+                                           QtCore.Qt.QueuedConnection,
+                                           QtCore.Q_ARG(str, s))
+            
+            # Implement rolling log more efficiently
+            if hasattr(self, 'log_line_count'):
                 self.log_line_count += 1
-                
-                # If we've exceeded the max lines, remove the oldest lines
                 if self.log_line_count > MAX_LOG_LINES:
-                    # Get the current text
-                    cursor = self.log.textCursor()
-                    cursor.movePosition(QtGui.QTextCursor.Start)
-                    # Find and remove the first line
-                    cursor.movePosition(QtGui.QTextCursor.Down, QtGui.QTextCursor.KeepAnchor)
-                    cursor.removeSelectedText()
-                    self.log_line_count -= 1
-                
-                # Append the new line
-                self.log.append(s)
-                
-                # Auto-scroll to bottom to follow the last line
-                scrollbar = self.log.verticalScrollBar()
-                if scrollbar:
-                    scrollbar.setValue(scrollbar.maximum())
+                    # Clear old content periodically
+                    QtCore.QMetaObject.invokeMethod(self, "_trim_log", QtCore.Qt.QueuedConnection)
+                    
+        except RuntimeError:
+            # Widget was deleted, ignore
+            pass
         except Exception as e:
             # Silently fail if log widget has issues
-            print(f"[Log Error] {e}: {s}")
+            try:
+                print(f"[Log Error] {e}: {s[:100]}")
+            except:
+                pass  # Even printing might fail
+    
+    @QtCore.Slot()
+    def _trim_log(self):
+        """Trim log to prevent memory issues - runs on main thread"""
+        try:
+            if hasattr(self, 'log') and self.log:
+                text = self.log.toPlainText()
+                lines = text.split('\n')
+                if len(lines) > MAX_LOG_LINES:
+                    # Keep only the last MAX_LOG_LINES
+                    self.log.setPlainText('\n'.join(lines[-MAX_LOG_LINES:]))
+                    self.log_line_count = MAX_LOG_LINES
+                # Move cursor to end
+                cursor = self.log.textCursor()
+                cursor.movePosition(QtGui.QTextCursor.End)
+                self.log.setTextCursor(cursor)
+        except:
+            pass
 
     # ----- playback buttons -----
     def _play_clicked(self):
@@ -874,13 +952,18 @@ class SDRBoombox(QtWidgets.QMainWindow):
         QtCore.QMetaObject.invokeMethod(self.worker, "start_fm")
 
     # ----- metadata/log parsing -----
+    @QtCore.Slot(str)
     def _handle_log_line(self, s: str):
         # Protect against very long log lines that could cause memory issues
         if len(s) > 5000:
             s = s[:5000] + "... [truncated]"
         
         self._append_log(s)
-        line = self._ts_re.sub("", s).strip()
+        
+        try:
+            line = self._ts_re.sub("", s).strip()
+        except Exception:
+            return  # Skip malformed lines
         
         # Check for LOT (album art) file writes from nrsc5
         # nrsc5 outputs: "LOT file: port=0810 lot=136 name=TMT_03g9rc_2_1_20251031_1434_0088.png size=5131 mime=4F328CA0"
@@ -1509,34 +1592,53 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     q = quote_plus(f"{artist} {title}")
                     req = Request(f"https://itunes.apple.com/search?term={q}&entity=song&limit=1",
                                   headers={"User-Agent": "SDR-Boombox"})
-                    with urlopen(req, timeout=5) as r:
-                        data = r.read().decode("utf-8", "ignore")
+                    
+                    # Add timeout and error handling for network operations
+                    try:
+                        with urlopen(req, timeout=5) as r:
+                            data = r.read().decode("utf-8", "ignore")
+                    except (URLError, HTTPError, TimeoutError) as e:
+                        self._append_log(f"[art] Network error fetching from iTunes: {e}")
+                        return
+                    
                     # very light parse to find artworkUrl100
                     m = re.search(r'"artworkUrl100"\s*:\s*"([^"]+)"', data)
                     if m:
                         url = m.group(1).replace("100x100bb.jpg", "300x300bb.jpg")
-                        with urlopen(Request(url, headers={"User-Agent": "SDR-Boombox"}), timeout=5) as r2:
-                            raw = r2.read()
-                        pm.loadFromData(raw)
-                        found_art = not pm.isNull()
-                        if found_art:
-                            self._append_log(f"[art] Album art retrieved from iTunes API successfully")
-                        else:
-                            self._append_log(f"[art] iTunes API returned invalid image data")
+                        try:
+                            with urlopen(Request(url, headers={"User-Agent": "SDR-Boombox"}), timeout=5) as r2:
+                                raw = r2.read()
+                            pm.loadFromData(raw)
+                            found_art = not pm.isNull()
+                            if found_art:
+                                self._append_log(f"[art] Album art retrieved from iTunes API successfully")
+                            else:
+                                self._append_log(f"[art] iTunes API returned invalid image data")
+                        except Exception:
+                            self._append_log(f"[art] Failed to download album art image")
                     else:
                         self._append_log(f"[art] No album art found in iTunes API for: {artist} - {title}")
                 except Exception as e:
-                    self._append_log(f"[art] iTunes API fetch failed: {e}")
+                    self._append_log(f"[art] iTunes API fetch failed: {str(e)[:100]}")
 
             # Store whether we found real album art
-            self._has_album_art = found_art
+            try:
+                self._has_album_art = found_art
+            except:
+                return  # Object might be deleted
             
             # If we have art, emit it; otherwise the visualizer will be shown
             if found_art:
-                self.artReady.emit(pm)
+                try:
+                    self.artReady.emit(pm)
+                except RuntimeError:
+                    pass  # Widget deleted
             else:
                 # Switch to visualizer instead of showing emoji
-                QtCore.QMetaObject.invokeMethod(self, "_show_visualizer", QtCore.Qt.QueuedConnection)
+                try:
+                    QtCore.QMetaObject.invokeMethod(self, "_show_visualizer", QtCore.Qt.QueuedConnection)
+                except RuntimeError:
+                    pass  # Widget deleted
 
         threading.Thread(target=job, daemon=True).start()
 
