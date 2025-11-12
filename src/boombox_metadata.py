@@ -18,6 +18,7 @@ class MetadataHandler(QtCore.QObject):
     
     # Signals
     artReady = QtCore.Signal(QtGui.QPixmap)  # pixmap
+    artClear = QtCore.Signal()  # signal to clear art and show visualizer
     stationInfoUpdate = QtCore.Signal(list)  # list of station info items
     metadataUpdate = QtCore.Signal(str, str)  # title, subtitle
     
@@ -122,6 +123,7 @@ class MetadataHandler(QtCore.QObject):
             if t and t != self.last_title:
                 self.last_title = t
                 self.has_lot_art = False  # Reset for new song
+                self.current_art_key = ""  # Reset art key for new song
                 updates['title'] = t
                 metadata_changed = True
         
@@ -132,6 +134,7 @@ class MetadataHandler(QtCore.QObject):
             if a and a != self.last_artist:
                 self.last_artist = a
                 self.has_lot_art = False
+                self.current_art_key = ""  # Reset art key for new song
                 updates['artist'] = a
                 metadata_changed = True
         
@@ -201,6 +204,9 @@ class MetadataHandler(QtCore.QObject):
             # Emit metadata updates for title/artist
             if 'title' in updates or 'artist' in updates:
                 self._update_metadata_display()
+                # Clear art display when song changes (will be replaced if art is found)
+                if not self.has_lot_art:
+                    self.artClear.emit()
                 # Log to stats database if we have both title and artist
                 if self.last_title and self.last_artist:
                     self._log_to_stats(log_callback)
@@ -379,9 +385,13 @@ class MetadataHandler(QtCore.QObject):
                 else:
                     if log_callback:
                         log_callback(f"[art] No album art found in iTunes API for: {artist} - {title}")
+                    # Emit signal to clear art and show visualizer
+                    self.artClear.emit()
             except Exception as e:
                 if log_callback:
                     log_callback(f"[art] iTunes API fetch failed: {str(e)[:100]}")
+                # Emit signal to clear art and show visualizer on error
+                self.artClear.emit()
         
         # Run in background thread
         threading.Thread(target=fetch, daemon=True).start()

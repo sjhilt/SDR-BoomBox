@@ -393,6 +393,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.map_handler = MapHandler(self)
         self.sleep_preventer = SleepPreventer()
         
+        # Load presets to update button labels
+        self._load_presets()
+        
         # Initialize worker with LOT directory
         self.worker = Worker(self.cfg, LOT_FILES_DIR)
         self.thread = QtCore.QThread(self)
@@ -408,6 +411,7 @@ class SDRBoombox(QtWidgets.QMainWindow):
         
         # Metadata handler signals
         self.metadata_handler.artReady.connect(self._set_album_art)
+        self.metadata_handler.artClear.connect(self._clear_album_art)
         self.metadata_handler.stationInfoUpdate.connect(self._update_station_info)
         self.metadata_handler.metadataUpdate.connect(self._update_metadata_display)
         
@@ -811,6 +815,15 @@ class SDRBoombox(QtWidgets.QMainWindow):
                     self._display_station_logo(first_logo['pixmap'])
         else:
             self.art_stack.setCurrentWidget(self.visualizer)
+    
+    @QtCore.Slot()
+    def _clear_album_art(self):
+        """Clear album art and show visualizer"""
+        self.art_stack.setCurrentWidget(self.visualizer)
+        # Keep station logo if it exists
+        if hasattr(self.metadata_handler, 'station_logos') and self.metadata_handler.station_logos:
+            # Keep displaying the station logo watermark
+            pass
             
     def _on_map_ready(self, pixmap: QtGui.QPixmap):
         """Handle map ready from map handler"""
