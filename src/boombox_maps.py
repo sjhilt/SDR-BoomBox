@@ -325,34 +325,125 @@ class MapHandler(QtCore.QObject):
         if self._base_map_cache and not self._base_map_cache.isNull():
             return QtGui.QPixmap(self._base_map_cache)
         
-        # If we have traffic tiles, use them as the base map
-        if self.combined_traffic_map and not self.combined_traffic_map.isNull():
-            self._base_map_cache = QtGui.QPixmap(self.combined_traffic_map)
-            return QtGui.QPixmap(self._base_map_cache)
+        # Try to fetch a real map from OpenStreetMap
+        try:
+            # Use a reasonable default location (US center) and zoom
+            # This provides a good overview for weather radar
+            lat, lon = 39.8283, -98.5795  # Geographic center of contiguous US
+            zoom = 4  # Country-level view
+            
+            # Fetch map tile from OpenStreetMap
+            tile_url = f"https://tile.openstreetmap.org/{zoom}/8/6.png"
+            
+            # For a better map, we'll create a composite of multiple tiles
+            base_map = self._fetch_osm_tiles(lat, lon, zoom, 600, 600)
+            
+            if base_map and not base_map.isNull():
+                self._base_map_cache = QtGui.QPixmap(base_map)
+                return base_map
+        except Exception:
+            pass
         
-        # Otherwise create a simple placeholder map
+        # Fallback to a simple generated map
         base_map = QtGui.QPixmap(600, 600)
-        base_map.fill(QtGui.QColor(20, 20, 30))  # Dark background
+        base_map.fill(QtGui.QColor(20, 30, 40))  # Dark blue background (water)
         
         painter = QtGui.QPainter(base_map)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         
-        # Draw a simple grid
-        painter.setPen(QtGui.QPen(QtGui.QColor(40, 40, 50), 1, QtCore.Qt.DotLine))
-        for i in range(0, 601, 60):
-            painter.drawLine(i, 0, i, 600)
-            painter.drawLine(0, i, 600, i)
+        # Draw a simple US map outline
+        painter.setPen(QtGui.QPen(QtGui.QColor(80, 120, 80), 2))  # Green for land
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(60, 90, 60)))  # Darker green fill
         
-        # Add text indicating this is a placeholder
-        painter.setPen(QtGui.QColor(100, 100, 100))
-        painter.setFont(QtGui.QFont("Arial", 14))
-        painter.drawText(base_map.rect(), QtCore.Qt.AlignCenter, 
-                        "Waiting for map data from HD Radio broadcast")
+        # Simplified US outline (very basic)
+        us_outline = [
+            QtCore.QPoint(100, 250), QtCore.QPoint(150, 200), QtCore.QPoint(250, 180),
+            QtCore.QPoint(400, 170), QtCore.QPoint(500, 200), QtCore.QPoint(520, 250),
+            QtCore.QPoint(500, 350), QtCore.QPoint(450, 400), QtCore.QPoint(350, 420),
+            QtCore.QPoint(200, 400), QtCore.QPoint(100, 350), QtCore.QPoint(100, 250)
+        ]
+        painter.drawPolygon(us_outline)
+        
+        # Add state boundaries (simplified grid)
+        painter.setPen(QtGui.QPen(QtGui.QColor(50, 70, 50), 1, QtCore.Qt.DotLine))
+        for i in range(150, 500, 50):
+            painter.drawLine(i, 180, i, 420)
+        for i in range(200, 400, 40):
+            painter.drawLine(100, i, 520, i)
+        
+        # Add text
+        painter.setPen(QtGui.QColor(150, 150, 150))
+        painter.setFont(QtGui.QFont("Arial", 10))
+        painter.drawText(10, 590, "Base map for weather overlay")
         
         painter.end()
         
-        # Don't cache the placeholder
-        return base_map
+        self._base_map_cache = base_map
+        return QtGui.QPixmap(base_map)
+    
+    def _fetch_osm_tiles(self, lat: float, lon: float, zoom: int, width: int, height: int):
+        """Fetch and compose OpenStreetMap tiles for the given area"""
+        try:
+            import math
+            from urllib.request import Request
+            
+            # Convert lat/lon to tile numbers
+            def lat_lon_to_tile(lat, lon, zoom):
+                lat_rad = math.radians(lat)
+                n = 2.0 ** zoom
+                x = int((lon + 180.0) / 360.0 * n)
+                y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+                return x, y
+            
+            # Calculate center tile
+            center_x, center_y = lat_lon_to_tile(lat, lon, zoom)
+            
+            # Create composite map (3x3 tiles for better coverage)
+            tile_size = 256
+            composite = QtGui.QPixmap(tile_size * 3, tile_size * 3)
+            composite.fill(QtGui.QColor(20, 30, 40))
+            
+            painter = QtGui.QPainter(composite)
+            
+            # Fetch surrounding tiles
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    tile_x = center_x + dx
+                    tile_y = center_y + dy
+                    
+                    try:
+                        # Fetch tile from OSM
+                        url = f"https://tile.openstreetmap.org/{zoom}/{tile_x}/{tile_y}.png"
+                        req = Request(url, headers={
+                            'User-Agent': 'SDR-Boombox/2.0 (https://github.com/sjhilt/SDR-Boombox)'
+                        })
+                        
+                        with urlopen(req, timeout=2) as response:
+                            data = response.read()
+                        
+                        # Load tile
+                        tile_pm = QtGui.QPixmap()
+                        tile_pm.loadFromData(data)
+                        
+                        if not tile_pm.isNull():
+                            # Draw tile at correct position
+                            x = (dx + 1) * tile_size
+                            y = (dy + 1) * tile_size
+                            painter.drawPixmap(x, y, tile_pm)
+                    except:
+                        # Skip failed tiles
+                        pass
+            
+            painter.end()
+            
+            # Scale to desired size
+            if composite and not composite.isNull():
+                return composite.scaled(width, height, QtCore.Qt.KeepAspectRatio,
+                                       QtCore.Qt.SmoothTransformation)
+        except Exception:
+            pass
+        
+        return None
     
     def parse_log_line(self, line: str):
         """Parse log lines for map data"""
