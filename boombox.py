@@ -416,7 +416,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
         self.metadata_handler.metadataUpdate.connect(self._update_metadata_display)
         
         # Map handler signals
-        self.map_handler.mapReady.connect(self._on_map_ready)
+        self.map_handler.trafficMapReady.connect(self._on_traffic_map_ready)
+        self.map_handler.weatherMapReady.connect(self._on_weather_map_ready)
         
         # Initialize state
         self._hd_synced = False
@@ -825,10 +826,19 @@ class SDRBoombox(QtWidgets.QMainWindow):
             # Keep displaying the station logo watermark
             pass
             
-    def _on_map_ready(self, pixmap: QtGui.QPixmap):
-        """Handle map ready from map handler"""
-        if self.map_window and hasattr(self.map_window, 'update_map'):
-            self.map_window.update_map(pixmap)
+    def _on_traffic_map_ready(self, pixmap: QtGui.QPixmap):
+        """Handle traffic map ready from map handler"""
+        if self.map_window and hasattr(self.map_window, 'update_traffic_map'):
+            self.map_window.update_traffic_map(pixmap)
+            
+        # Flash map button to indicate update
+        self.btn_open_map.setText("Map •")
+        QtCore.QTimer.singleShot(3000, lambda: self.btn_open_map.setText("Map"))
+    
+    def _on_weather_map_ready(self, pixmap: QtGui.QPixmap):
+        """Handle weather map ready from map handler"""
+        if self.map_window and hasattr(self.map_window, 'update_weather_map'):
+            self.map_window.update_weather_map(pixmap)
             
         # Flash map button to indicate update
         self.btn_open_map.setText("Map •")

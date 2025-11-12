@@ -15,7 +15,9 @@ class MapHandler(QtCore.QObject):
     """Handles traffic and weather map data from HD Radio broadcasts"""
     
     # Signals
-    mapReady = QtCore.Signal(QtGui.QPixmap)  # pixmap for map display
+    mapReady = QtCore.Signal(QtGui.QPixmap)  # generic map signal (deprecated)
+    trafficMapReady = QtCore.Signal(QtGui.QPixmap)  # traffic map signal
+    weatherMapReady = QtCore.Signal(QtGui.QPixmap)  # weather map signal
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,9 +132,11 @@ class MapHandler(QtCore.QObject):
                 
                 painter.end()
                 
-                # Store and emit the combined traffic map
+                # Store the combined traffic map
                 self.combined_traffic_map = combined
-                self.mapReady.emit(combined)
+                
+                # Emit as traffic map (type = "traffic")
+                self.trafficMapReady.emit(combined)
                 
                 if log_callback:
                     log_callback(f"[map] Traffic map assembled from 9 tiles")
@@ -225,7 +229,7 @@ class MapHandler(QtCore.QObject):
                         log_callback(f"[weather] Composite map created with weather overlay")
             
             # Emit the composite weather map
-            self.mapReady.emit(composite_map)
+            self.weatherMapReady.emit(composite_map)
             
         except Exception as e:
             if log_callback:
@@ -476,13 +480,5 @@ class MapWindow(QtWidgets.QWidget):
             self.tabs.setCurrentIndex(1)
     
     def update_map(self, pixmap: QtGui.QPixmap):
-        """Update the appropriate map display based on current content"""
-        if pixmap and not pixmap.isNull():
-            # Update both tabs with the same map for now
-            # In the future, we could differentiate between traffic and weather
-            pm_scaled = pixmap.scaled(600, 600, QtCore.Qt.KeepAspectRatio,
-                                     QtCore.Qt.SmoothTransformation)
-            self.traffic_map_widget.setPixmap(pm_scaled)
-            self.traffic_map_widget.setText("")
-            self.weather_map_widget.setPixmap(pm_scaled)
-            self.weather_map_widget.setText("")
+        """Legacy method - updates traffic map only"""
+        self.update_traffic_map(pixmap)
