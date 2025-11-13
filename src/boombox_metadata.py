@@ -457,26 +457,31 @@ class MetadataHandler(QtCore.QObject):
         
         t = text.lower()
         
-        # Station-related phrases
+        # Station-related phrases (case-insensitive)
         bad_phrases = ["commercial", "advertisement", "promo", "jingle", "weather", "traffic",
                       "coming up", "you're listening", "stay tuned", "call us", "text us", "win", 
                       "contest", "hd1", "hd2", "hd3", "hd4", "station id", "station identification", 
-                      "#1", "US-"]
+                      "#1", "us-", "us101", "us 101"]
         
         # Check for exact phrase matches
         for phrase in bad_phrases:
             if phrase in t:
                 return True
         
-        # Check if it's JUST a station name/slogan (no actual song info)
-        station_only_patterns = [
+        # Check for specific station call signs and patterns
+        station_patterns = [
+            r"^w[a-z]{2,3}\s+",  # Call signs starting with W (WUSY, WKDF, etc.)
+            r"^k[a-z]{2,3}\s+",  # Call signs starting with K (KQED, KROQ, etc.)
             r"^(kiss|rock|country|hits|classic|news|talk)\s*(fm|am)?$",  # Just "KISS FM" etc
             r"^\d{2,3}\.\d\s*(fm|am)?$",  # Just frequency like "103.7"
             r"chattanooga'?s?\s+(rock|country|hits|classic)\s+station",  # Station slogans
-            r"^(rock|kiss|country|hits|classic)\s+\d{2,3}\.\d$"  # "Rock 103.7" pattern
+            r"^(rock|kiss|country|hits|classic)\s+\d{2,3}\.\d$",  # "Rock 103.7" pattern
+            r"^\w{3,4}\s+\w{2,3}-?\d{2,3}",  # Pattern like "WUSY US-101" or "KROQ HD-2"
+            r"^us-?\d{2,3}",  # US-101, US101 patterns
+            r"^\w{3,4}\s+\d{2,3}\.\d"  # Call sign + frequency like "WUSY 100.7"
         ]
         
-        for pattern in station_only_patterns:
+        for pattern in station_patterns:
             if re.search(pattern, t):
                 return True
         
@@ -627,6 +632,12 @@ class MetadataHandler(QtCore.QObject):
         if self.looks_like_station(artist) or self.looks_like_station(title):
             if log_callback:
                 log_callback(f"[stats] Skipping station content: {artist} - {title}")
+            return
+        
+        # Also skip if title and artist are identical (likely station ID)
+        if title == artist:
+            if log_callback:
+                log_callback(f"[stats] Skipping identical title/artist (likely station ID): {title}")
             return
         
         try:
