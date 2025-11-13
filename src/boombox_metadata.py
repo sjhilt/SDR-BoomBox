@@ -74,6 +74,13 @@ class MetadataHandler(QtCore.QObject):
         # Stats database
         self.stats_db = None
         self.songs_logged_count = 0  # Track songs for cleanup trigger
+        self.lot_files_count = 0  # Track LOT files for periodic cleanup
+        
+        # Periodic cleanup timer (every 30 minutes)
+        self.periodic_cleanup_timer = QtCore.QTimer()
+        self.periodic_cleanup_timer.timeout.connect(self._periodic_cleanup)
+        self.periodic_cleanup_timer.start(30 * 60 * 1000)  # 30 minutes in milliseconds
+        
         try:
             import sys
             import os
@@ -487,6 +494,18 @@ class MetadataHandler(QtCore.QObject):
         
         return False
     
+    def _periodic_cleanup(self):
+        """Periodic cleanup of LOT files (called every 30 minutes)"""
+        try:
+            removed = self.cleanup_lot_files(keep_count=50)
+            if removed and removed > 0:
+                # Log through parent if available
+                parent = self.parent()
+                if parent and hasattr(parent, 'log'):
+                    parent.log(f"[cleanup] Periodic cleanup: Removed {removed} old LOT files (keeping last 50)")
+        except Exception:
+            pass  # Silently handle any errors
+    
     def reset(self):
         """Reset all metadata state"""
         self.station_name = ""
@@ -511,14 +530,18 @@ class MetadataHandler(QtCore.QObject):
         self.pending_song_log = None
         self.last_logged_song = None
     
-    def cleanup_lot_files(self, keep_count: int = 100):
+    def cleanup_lot_files(self, keep_count: int = 50):
         """Clean up old LOT files, keeping only the most recent ones"""
         try:
             if not self.lot_dir.exists():
-                return
+                return 0
             
             # Get all files in the LOT directory
             files = list(self.lot_dir.glob("*"))
+            
+            # If no files, nothing to clean
+            if not files:
+                return 0
             
             # Sort by modification time (oldest first)
             files.sort(key=lambda f: f.stat().st_mtime)
@@ -530,10 +553,12 @@ class MetadataHandler(QtCore.QObject):
                     try:
                         f.unlink()
                         removed_count += 1
-                    except:
+                    except Exception as e:
+                        # Log individual file deletion errors but continue
                         pass
                 return removed_count
-        except Exception:
+        except Exception as e:
+            # Log the error but don't crash
             pass
         return 0
     
@@ -656,13 +681,13 @@ class MetadataHandler(QtCore.QObject):
             if log_callback:
                 log_callback(f"[stats] Logged: {artist} - {title} on {station}")
             
-            # Increment counter and cleanup LOT files every 10 songs
+            # Increment counter and cleanup LOT files every 5 songs
             self.songs_logged_count += 1
-            if self.songs_logged_count >= 10:
+            if self.songs_logged_count >= 5:
                 self.songs_logged_count = 0
-                removed = self.cleanup_lot_files(keep_count=100)
+                removed = self.cleanup_lot_files(keep_count=50)  # Reduced from 100 to 50
                 if removed and removed > 0 and log_callback:
-                    log_callback(f"[cleanup] Removed {removed} old LOT files (keeping last 100)")
+                    log_callback(f"[cleanup] Removed {removed} old LOT files (keeping last 50)")
                     
         except Exception as e:
             if log_callback:
