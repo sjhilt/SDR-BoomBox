@@ -60,8 +60,10 @@ class MetadataHandler(QtCore.QObject):
         
         # Song change tracking for delayed logging
         self.pending_song_log = None
-        self.song_log_timer = None
-        self.last_song_change_time = 0
+        self.song_log_timer = QtCore.QTimer()
+        self.song_log_timer.setSingleShot(True)
+        self.song_log_timer.timeout.connect(self._execute_delayed_log)
+        self.last_logged_song = None  # Track last logged song to avoid duplicates
         
         # iTunes art fetch delay timer
         self.itunes_fetch_timer = QtCore.QTimer()
@@ -224,9 +226,9 @@ class MetadataHandler(QtCore.QObject):
             # Emit metadata updates for title/artist
             if 'title' in updates or 'artist' in updates:
                 self._update_metadata_display()
-                # Log to stats database if we have both title and artist
+                # Schedule delayed logging if we have both title and artist
                 if self.last_title and self.last_artist:
-                    self._log_to_stats(log_callback)
+                    self._schedule_delayed_log(log_callback)
                 # Schedule iTunes art fetch with delay if we have both artist and title
                 # and we don't have LOT art yet
                 if self.last_title and self.last_artist and not self.has_lot_art:
@@ -499,6 +501,10 @@ class MetadataHandler(QtCore.QObject):
         # Cancel any pending iTunes fetch
         self.itunes_fetch_timer.stop()
         self.pending_itunes_fetch = None
+        # Cancel any pending song log
+        self.song_log_timer.stop()
+        self.pending_song_log = None
+        self.last_logged_song = None
     
     def cleanup_lot_files(self, keep_count: int = 100):
         """Clean up old LOT files, keeping only the most recent ones"""
@@ -570,13 +576,57 @@ class MetadataHandler(QtCore.QObject):
         """Set the current frequency for stats logging"""
         self.current_frequency = frequency
     
-    def _log_to_stats(self, log_callback=None):
-        """Log current song to stats database"""
+    def _schedule_delayed_log(self, log_callback=None):
+        """Schedule a delayed log to wait for complete metadata"""
+        # Cancel any existing timer
+        self.song_log_timer.stop()
+        
+        # Store the pending log info
+        self.pending_song_log = {
+            'title': self.last_title,
+            'artist': self.last_artist,
+            'album': self.last_album,
+            'log_callback': log_callback
+        }
+        
+        # Start timer - wait 2 seconds for any additional metadata updates
+        self.song_log_timer.start(2000)
+    
+    def _execute_delayed_log(self):
+        """Execute the delayed log after timer expires"""
+        if not self.pending_song_log:
+            return
+        
+        # Extract the pending log info
+        title = self.pending_song_log['title']
+        artist = self.pending_song_log['artist']
+        album = self.pending_song_log['album']
+        log_callback = self.pending_song_log['log_callback']
+        
+        # Check if this is actually a new song (not a duplicate)
+        current_song = f"{artist}||{title}"
+        if current_song == self.last_logged_song:
+            if log_callback:
+                log_callback(f"[stats] Skipping duplicate: {artist} - {title}")
+            self.pending_song_log = None
+            return
+        
+        # Log the song
+        self._log_to_stats(title, artist, album, log_callback)
+        
+        # Update last logged song
+        self.last_logged_song = current_song
+        self.pending_song_log = None
+    
+    def _log_to_stats(self, title: str, artist: str, album: str, log_callback=None):
+        """Log song to stats database"""
         if not self.stats_db:
             return
         
         # Don't log station content
-        if self.looks_like_station(self.last_artist) or self.looks_like_station(self.last_title):
+        if self.looks_like_station(artist) or self.looks_like_station(title):
+            if log_callback:
+                log_callback(f"[stats] Skipping station content: {artist} - {title}")
             return
         
         try:
@@ -584,16 +634,16 @@ class MetadataHandler(QtCore.QObject):
             station = self.station_name if self.station_name else f"{self.current_frequency:.1f} MHz"
             
             self.stats_db.add_song(
-                title=self.last_title,
-                artist=self.last_artist,
+                title=title,
+                artist=artist,
                 station=station,
                 frequency=self.current_frequency,
-                album=self.last_album,
+                album=album,
                 hd_channel=self.current_hd_channel
             )
             
             if log_callback:
-                log_callback(f"[stats] Logged: {self.last_artist} - {self.last_title} on {station}")
+                log_callback(f"[stats] Logged: {artist} - {title} on {station}")
             
             # Increment counter and cleanup LOT files every 10 songs
             self.songs_logged_count += 1
