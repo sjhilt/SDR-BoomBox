@@ -63,6 +63,12 @@ class MetadataHandler(QtCore.QObject):
         self.song_log_timer = None
         self.last_song_change_time = 0
         
+        # iTunes art fetch delay timer
+        self.itunes_fetch_timer = QtCore.QTimer()
+        self.itunes_fetch_timer.setSingleShot(True)
+        self.itunes_fetch_timer.timeout.connect(self._delayed_itunes_fetch)
+        self.pending_itunes_fetch = None  # Store (artist, title, log_callback) tuple
+        
         # Stats database
         self.stats_db = None
         self.songs_logged_count = 0  # Track songs for cleanup trigger
@@ -221,10 +227,16 @@ class MetadataHandler(QtCore.QObject):
                 # Log to stats database if we have both title and artist
                 if self.last_title and self.last_artist:
                     self._log_to_stats(log_callback)
-                # Try to fetch iTunes art if we have both artist and title
+                # Schedule iTunes art fetch with delay if we have both artist and title
                 # and we don't have LOT art yet
                 if self.last_title and self.last_artist and not self.has_lot_art:
-                    self.fetch_itunes_art(self.last_artist, self.last_title, log_callback)
+                    # Cancel any pending fetch
+                    self.itunes_fetch_timer.stop()
+                    # Store the fetch info and start timer (wait 3 seconds for LOT art)
+                    self.pending_itunes_fetch = (self.last_artist, self.last_title, log_callback)
+                    self.itunes_fetch_timer.start(3000)  # 3 second delay
+                    if log_callback:
+                        log_callback("[art] Scheduling iTunes fetch in 3 seconds (waiting for possible LOT art)")
     
     def handle_lot_art(self, lot_file: str, log_callback=None):
         """Handle album art from LOT files"""
@@ -254,6 +266,12 @@ class MetadataHandler(QtCore.QObject):
                     if not pm.isNull():
                         self.has_lot_art = True
                         self.current_art_key = f"LOT||{lot_file}"
+                        # Cancel any pending iTunes fetch since we have LOT art now
+                        if self.itunes_fetch_timer.isActive():
+                            self.itunes_fetch_timer.stop()
+                            self.pending_itunes_fetch = None
+                            if log_callback:
+                                log_callback("[art] Cancelled pending iTunes fetch - LOT art available")
                         self.artReady.emit(pm)
                         if log_callback:
                             log_callback(f"[art] Album art loaded from LOT file: {lot_file} (replacing any iTunes art)")
@@ -347,6 +365,21 @@ class MetadataHandler(QtCore.QObject):
             logo_info = self.station_logos[self.current_logo_index]
             return logo_info['pixmap'], logo_info
         return None, None
+    
+    def _delayed_itunes_fetch(self):
+        """Called after delay to fetch iTunes art if still needed"""
+        if self.pending_itunes_fetch:
+            artist, title, log_callback = self.pending_itunes_fetch
+            self.pending_itunes_fetch = None
+            
+            # Check again if we still need iTunes art
+            if not self.has_lot_art and self.last_artist == artist and self.last_title == title:
+                self.fetch_itunes_art(artist, title, log_callback)
+            elif log_callback:
+                if self.has_lot_art:
+                    log_callback("[art] Cancelled iTunes fetch - LOT art received during wait")
+                else:
+                    log_callback("[art] Cancelled iTunes fetch - song changed during wait")
     
     def fetch_itunes_art(self, artist: str, title: str, log_callback=None):
         """Fetch album art from iTunes API"""
@@ -463,6 +496,9 @@ class MetadataHandler(QtCore.QObject):
         self.pending_lot_art = ""
         self.station_logos = []
         self.current_logo_index = 0
+        # Cancel any pending iTunes fetch
+        self.itunes_fetch_timer.stop()
+        self.pending_itunes_fetch = None
     
     def cleanup_lot_files(self, keep_count: int = 100):
         """Clean up old LOT files, keeping only the most recent ones"""
