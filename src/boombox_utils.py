@@ -135,3 +135,50 @@ class SleepPreventer:
 
 # Import QtCore for the emoji_pixmap function
 from PySide6 import QtCore
+
+
+def cleanup_lot_files(keep_recent: bool = False, log_callback=None):
+    """Clean up LOT files directory
+    
+    Args:
+        keep_recent: If True, keep the most recent 20 files. If False, delete all.
+        log_callback: Optional callback for logging
+    """
+    try:
+        if not LOT_FILES_DIR.exists():
+            return 0
+        
+        files = list(LOT_FILES_DIR.glob("*"))
+        
+        if not files:
+            return 0
+        
+        if keep_recent and len(files) > 20:
+            # Sort by modification time and keep only the most recent 20
+            files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            files_to_delete = files[20:]
+        elif not keep_recent:
+            # Delete all files
+            files_to_delete = files
+        else:
+            return 0
+        
+        deleted_count = 0
+        for f in files_to_delete:
+            try:
+                if f.is_file():
+                    f.unlink()
+                    deleted_count += 1
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"[cleanup] Could not delete {f.name}: {e}")
+        
+        if log_callback and deleted_count > 0:
+            log_callback(f"[cleanup] Deleted {deleted_count} LOT files")
+        
+        return deleted_count
+        
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[cleanup] Error cleaning LOT files: {e}")
+        return 0

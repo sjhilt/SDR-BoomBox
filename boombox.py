@@ -1,5 +1,4 @@
 """
-===============================================================
    SDR-Boombox
    HD Radio (NRSC-5) + Analog FM Receiver & Visual Interface
 ===============================================================
@@ -32,7 +31,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 # Import modular components from src folder
 from src.boombox_utils import (
     APP_NAME, FALLBACK_TIMEOUT_S, PRESETS_PATH, SETTINGS_PATH, 
-    LOT_FILES_DIR, MAX_LOG_LINES, which, emoji_pixmap, SleepPreventer
+    LOT_FILES_DIR, MAX_LOG_LINES, which, emoji_pixmap, SleepPreventer,
+    cleanup_lot_files
 )
 from src.boombox_worker import Worker, Cfg
 from src.boombox_visualizer import VisualizerWidget
@@ -54,6 +54,9 @@ class SDRBoombox(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("SDR-Boombox – HD Radio (NRSC-5)")
         self.setMinimumSize(1020, 350)
+        
+        # Clean up old LOT files on startup (keep recent 20)
+        cleanup_lot_files(keep_recent=True)
         
         # Initialize components
         self._setup_ui()
@@ -890,6 +893,11 @@ class SDRBoombox(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         """Handle application close"""
         try:
+            # Clean up LOT files on exit (delete all)
+            deleted = cleanup_lot_files(keep_recent=False, log_callback=self._append_log)
+            if deleted > 0:
+                print(f"Cleaned up {deleted} LOT files on exit")
+            
             if self.map_window and self.map_window.isVisible():
                 self.map_window.close()
             self.sleep_preventer.prevent_sleep(False)

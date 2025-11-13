@@ -487,6 +487,7 @@ class MapHandler(QtCore.QObject):
                 if info_path.exists():
                     # Try to parse the DWRI file for location information
                     try:
+                        import math
                         # Try reading as text first
                         with open(info_path, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read()
@@ -497,40 +498,78 @@ class MapHandler(QtCore.QObject):
                             area_id = area_match.group(1)
                             if log_callback:
                                 log_callback(f"[weather] Found DWR_Area_ID: {area_id}")
+                        
+                        # Look for Coordinates in the DWRI file
+                        # Format: Coordinates="(lat1,lon1)";..."(lat2,lon2)" - bounding box corners
+                        coords_matches = re.findall(r'\((-?\d+\.?\d*),(-?\d+\.?\d*)\)', content)
+                        if len(coords_matches) >= 2:
+                            # We have a bounding box - calculate center
+                            lat1, lon1 = float(coords_matches[0][0]), float(coords_matches[0][1])
+                            lat2, lon2 = float(coords_matches[1][0]), float(coords_matches[1][1])
                             
-                            # Try to decode the area ID to location
-                            location = self._decode_area_id(area_id)
-                            if location:
-                                self.weather_location = location
-                                self._base_map_cache = None
-                                if log_callback:
-                                    log_callback(f"[weather] Location decoded from area ID: {location[0]:.4f}, {location[1]:.4f}")
-                        
-                        # Also look for explicit lat/lon patterns
-                        lat_match = re.search(r'lat[itude]*[:\s]+(-?\d+\.?\d*)', content, re.IGNORECASE)
-                        lon_match = re.search(r'lon[gitude]*[:\s]+(-?\d+\.?\d*)', content, re.IGNORECASE)
-                        
-                        if lat_match and lon_match:
-                            lat = float(lat_match.group(1))
-                            lon = float(lon_match.group(1))
+                            # Calculate center of bounding box
+                            center_lat = (lat1 + lat2) / 2
+                            center_lon = (lon1 + lon2) / 2
+                            
+                            self.weather_location = (center_lat, center_lon)
+                            self._base_map_cache = None
+                            
+                            if log_callback:
+                                log_callback(f"[weather] Bounding box: ({lat1:.4f},{lon1:.4f}) to ({lat2:.4f},{lon2:.4f})")
+                                log_callback(f"[weather] Map center calculated: {center_lat:.4f}, {center_lon:.4f}")
+                                
+                                # Calculate approximate coverage area
+                                lat_span = abs(lat2 - lat1)
+                                lon_span = abs(lon2 - lon1)
+                                # Rough approximation: 1 degree latitude = 69 miles
+                                coverage_height = lat_span * 69
+                                coverage_width = lon_span * 69 * abs(math.cos(math.radians(center_lat)))
+                                log_callback(f"[weather] Coverage area: ~{coverage_width:.0f} x {coverage_height:.0f} miles")
+                            
+                            # Store the area ID mapping for future use
+                            if area_match:
+                                self._store_area_mapping(area_match.group(1), (center_lat, center_lon), log_callback)
+                        elif coords_matches:
+                            # Single coordinate pair
+                            lat = float(coords_matches[0][0])
+                            lon = float(coords_matches[0][1])
                             self.weather_location = (lat, lon)
                             self._base_map_cache = None
                             if log_callback:
-                                log_callback(f"[weather] Location extracted from DWRI: {lat:.4f}, {lon:.4f}")
+                                log_callback(f"[weather] Location extracted from Coordinates: {lat:.4f}, {lon:.4f}")
+                            
+                            # Store the area ID mapping for future use
+                            if area_match:
+                                self._store_area_mapping(area_match.group(1), (lat, lon), log_callback)
                         
-                        # If we still don't have location, check if area_id matches traffic tile pattern
-                        if not self.weather_location and area_match:
-                            # The area ID might match the traffic tiles (e.g., "03g9rc")
-                            # Traffic tiles often encode regional information
-                            # Check if we have matching traffic tiles
-                            for (row, col), path in self.traffic_tiles.items():
-                                if area_id in path:
-                                    # Found matching traffic tiles - use their implied region
-                                    # This is a heuristic - traffic and weather often cover same region
+                        # If no Coordinates field, try other patterns
+                        elif not self.weather_location:
+                            # Look for explicit lat/lon patterns
+                            lat_match = re.search(r'lat[itude]*[:\s]+(-?\d+\.?\d*)', content, re.IGNORECASE)
+                            lon_match = re.search(r'lon[gitude]*[:\s]+(-?\d+\.?\d*)', content, re.IGNORECASE)
+                            
+                            if lat_match and lon_match:
+                                lat = float(lat_match.group(1))
+                                lon = float(lon_match.group(1))
+                                self.weather_location = (lat, lon)
+                                self._base_map_cache = None
+                                if log_callback:
+                                    log_callback(f"[weather] Location extracted from lat/lon: {lat:.4f}, {lon:.4f}")
+                            
+                            # Try to decode the area ID if we have one
+                            elif area_match:
+                                location = self._decode_area_id(area_match.group(1))
+                                if location:
+                                    self.weather_location = location
+                                    self._base_map_cache = None
                                     if log_callback:
-                                        log_callback(f"[weather] Area ID {area_id} matches traffic tiles - using regional default")
-                                    # Use a reasonable default for the region (will be overridden if better data found)
-                                    break
+                                        log_callback(f"[weather] Location decoded from area ID: {location[0]:.4f}, {location[1]:.4f}")
+                        
+                        # Parse station list for additional context
+                        station_match = re.search(r'StationList[=:\s]*"([^"]+)"', content)
+                        if station_match and log_callback:
+                            stations = station_match.group(1)
+                            log_callback(f"[weather] Associated stations: {stations}")
                     except Exception as e:
                         if log_callback:
                             log_callback(f"[weather] Error parsing DWRI file: {e}")
@@ -548,50 +587,88 @@ class MapHandler(QtCore.QObject):
     
     def _decode_area_id(self, area_id: str):
         """Attempt to decode an area ID to lat/lon coordinates"""
-        # Common area IDs and their approximate locations
-        # This is based on observed patterns in HD Radio broadcasts
-        area_locations = {
-            # Tennessee/Georgia region
-            "03g9rc": (35.0456, -85.3097),  # Chattanooga area
-            "03g9rb": (35.1495, -85.2327),  # Cleveland, TN area
-            "03g9ra": (34.9873, -85.2552),  # North Georgia
-            
-            # Add more area codes as discovered
-            # Format appears to be regional grid references
+        # Load stored area mappings from a cache file
+        cache_file = self.lot_dir.parent / "area_id_cache.json"
+        area_locations = {}
+        
+        try:
+            if cache_file.exists():
+                import json
+                with open(cache_file, 'r') as f:
+                    area_locations = json.load(f)
+        except:
+            pass
+        
+        # Check if we have a cached area code
+        if area_id in area_locations:
+            coords = area_locations[area_id]
+            return (coords[0], coords[1])
+        
+        # Fallback to known locations
+        known_locations = {
+            # Based on the provided data, 03g9rc appears to cover a wide area
+            # The coordinates provided were (37.20028,-87.55854) and (32.78696,-82.16865)
+            # This suggests it covers parts of Kentucky/Tennessee down to Georgia
+            "03g9rc": (35.0, -85.0),  # Approximate center of coverage area
         }
         
-        # Check if we have a known area code
-        if area_id in area_locations:
-            return area_locations[area_id]
+        if area_id in known_locations:
+            return known_locations[area_id]
         
-        # Try to parse as a geohash-like encoding
-        # The format seems to be: [region][grid][cell]
-        # e.g., "03g9rc" might be region 03, grid g9, cell rc
-        if len(area_id) >= 6:
-            try:
-                # Extract components
-                region = area_id[:2]  # First 2 chars
-                grid = area_id[2:4]    # Next 2 chars
-                cell = area_id[4:6]    # Next 2 chars
-                
-                # Rough approximation based on pattern
-                # This is a heuristic - actual encoding may differ
-                if region == "03":  # Southeast US
-                    # Base coordinates for region 03
-                    base_lat, base_lon = 35.0, -85.0
-                    
-                    # Adjust based on grid (very rough approximation)
-                    if 'g' in grid:
-                        grid_offset = (ord(grid[0]) - ord('a')) * 0.5
-                        base_lat += grid_offset * 0.1
-                    if grid[1].isdigit():
-                        base_lon -= int(grid[1]) * 0.1
-                    
-                    return (base_lat, base_lon)
-            except:
-                pass
+        # Try to parse based on region patterns
+        # The "03" prefix might indicate Southeast US region
+        if area_id.startswith("03"):
+            # Default to Southeast US center
+            return (34.0, -85.0)
+        elif area_id.startswith("01"):
+            # Northeast US
+            return (42.0, -73.0)
+        elif area_id.startswith("02"):
+            # Mid-Atlantic
+            return (38.0, -77.0)
+        elif area_id.startswith("04"):
+            # Midwest
+            return (41.0, -87.0)
+        elif area_id.startswith("05"):
+            # South Central
+            return (32.0, -97.0)
+        elif area_id.startswith("06"):
+            # Mountain
+            return (40.0, -105.0)
+        elif area_id.startswith("07"):
+            # Pacific
+            return (37.0, -122.0)
+        elif area_id.startswith("08"):
+            # Northwest
+            return (47.0, -122.0)
         
         return None
+    
+    def _store_area_mapping(self, area_id: str, location: tuple, log_callback=None):
+        """Store area ID to location mapping for future use"""
+        try:
+            cache_file = self.lot_dir.parent / "area_id_cache.json"
+            
+            # Load existing cache
+            area_cache = {}
+            if cache_file.exists():
+                import json
+                with open(cache_file, 'r') as f:
+                    area_cache = json.load(f)
+            
+            # Add new mapping
+            area_cache[area_id] = [location[0], location[1]]
+            
+            # Save updated cache
+            import json
+            with open(cache_file, 'w') as f:
+                json.dump(area_cache, f, indent=2)
+            
+            if log_callback:
+                log_callback(f"[weather] Cached area ID {area_id} -> {location[0]:.4f}, {location[1]:.4f}")
+        except Exception as e:
+            if log_callback:
+                log_callback(f"[weather] Could not cache area mapping: {e}")
     
     def reset(self):
         """Reset map handler state"""
