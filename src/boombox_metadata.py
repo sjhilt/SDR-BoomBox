@@ -28,6 +28,7 @@ class MetadataHandler(QtCore.QObject):
     _album_re = re.compile(r"\bAlbum:\s*(.+)", re.IGNORECASE)
     _slogan_re = re.compile(r"\bSlogan:\s*(.+)", re.IGNORECASE)
     _station_re = re.compile(r"\bStation name:\s*(.+)", re.IGNORECASE)
+    _genre_re = re.compile(r"\bGenre:\s*(.+)", re.IGNORECASE)
     _message_re = re.compile(r"\b(?:Message|Alert|Info):\s*(.+)", re.IGNORECASE)
     _bitrate_re = re.compile(r"\bBitrate:\s*(\d+(?:\.\d+)?)\s*kbps", re.IGNORECASE)
     _audio_re = re.compile(r"\bAudio bit rate:\s*(\d+(?:\.\d+)?)\s*kbps", re.IGNORECASE)
@@ -41,6 +42,7 @@ class MetadataHandler(QtCore.QObject):
         self._station_name = ""
         self.station_name = ""
         self.station_slogan = ""
+        self.station_genre = ""
         self.station_messages = []
         self.last_title = ""
         self.last_artist = ""
@@ -113,6 +115,13 @@ class MetadataHandler(QtCore.QObject):
         if m:
             self.station_slogan = m.group(1).strip()
             updates['station_slogan'] = self.station_slogan
+            metadata_changed = True
+        
+        # Genre
+        m = self._genre_re.search(line)
+        if m:
+            self.station_genre = m.group(1).strip()
+            updates['station_genre'] = self.station_genre
             metadata_changed = True
         
         # Messages/Alerts
@@ -224,7 +233,7 @@ class MetadataHandler(QtCore.QObject):
                 self.handle_station_logo(logo_file, port, log_callback)
             
             # Emit station info updates
-            if 'station_name' in updates or 'station_slogan' in updates:
+            if 'station_name' in updates or 'station_slogan' in updates or 'station_genre' in updates:
                 self._update_station_display()
                 # Also update metadata display if we don't have song info
                 if not self.last_title and not self.last_artist:
@@ -510,6 +519,7 @@ class MetadataHandler(QtCore.QObject):
         """Reset all metadata state"""
         self.station_name = ""
         self.station_slogan = ""
+        self.station_genre = ""
         self.station_messages = []
         self.last_title = ""
         self.last_artist = ""
@@ -579,6 +589,13 @@ class MetadataHandler(QtCore.QObject):
                 'color': '#b9b9b9',
                 'weight': 400,
                 'style': 'italic'
+            })
+        
+        if self.station_genre:
+            items.append({
+                'text': f"Genre: {self.station_genre}",
+                'color': '#a0a0a0',
+                'weight': 400
             })
         
         if items:
