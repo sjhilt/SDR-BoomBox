@@ -29,6 +29,7 @@ class MetadataHandler(QtCore.QObject):
     _slogan_re = re.compile(r"\bSlogan:\s*(.+)", re.IGNORECASE)
     _station_re = re.compile(r"\bStation name:\s*(.+)", re.IGNORECASE)
     _genre_re = re.compile(r"\bGenre:\s*(.+)", re.IGNORECASE)
+    _service_re = re.compile(r"Audio service (\d+):.*?type:\s*([^,]+)", re.IGNORECASE)
     _message_re = re.compile(r"\b(?:Message|Alert|Info):\s*(.+)", re.IGNORECASE)
     _bitrate_re = re.compile(r"\bBitrate:\s*(\d+(?:\.\d+)?)\s*kbps", re.IGNORECASE)
     _audio_re = re.compile(r"\bAudio bit rate:\s*(\d+(?:\.\d+)?)\s*kbps", re.IGNORECASE)
@@ -117,12 +118,28 @@ class MetadataHandler(QtCore.QObject):
             updates['station_slogan'] = self.station_slogan
             metadata_changed = True
         
-        # Genre
+        # Genre - first try explicit Genre: line
         m = self._genre_re.search(line)
         if m:
             self.station_genre = m.group(1).strip()
             updates['station_genre'] = self.station_genre
             metadata_changed = True
+        
+        # Genre from Audio service line (e.g., "Audio service 0: public, type: Top 40, codec: 0")
+        m = self._service_re.search(line)
+        if m:
+            service_num = int(m.group(1))
+            genre_type = m.group(2).strip()
+            
+            # Check if this service matches our HD program
+            # Service 0 = HD1, Service 1 = HD2, etc.
+            if service_num == hd_program:
+                # Clean up the genre string (remove quotes if present)
+                genre_type = genre_type.strip('"\'')
+                if genre_type and genre_type != self.station_genre:
+                    self.station_genre = genre_type
+                    updates['station_genre'] = self.station_genre
+                    metadata_changed = True
         
         # Messages/Alerts
         m = self._message_re.search(line)
@@ -658,11 +675,11 @@ class MetadataHandler(QtCore.QObject):
             self.pending_song_log = None
             return
         
-        # Check if this was the last song played (from database)
+        # Check if this song was recently played (within last 5 minutes)
         # This prevents re-logging when restarting app or switching back to a station
         if self.stats_db and self._is_last_played_song(artist, title):
             if log_callback:
-                log_callback(f"[stats] Skipping last played song (likely app restart or station switch): {artist} - {title}")
+                log_callback(f"[stats] Skipping recently played song (within 5 min): {artist} - {title}")
             # Update our session tracking but don't log to database
             self.last_logged_song = current_song
             self.pending_song_log = None
@@ -676,14 +693,15 @@ class MetadataHandler(QtCore.QObject):
         self.pending_song_log = None
     
     def _is_last_played_song(self, artist: str, title: str) -> bool:
-        """Check if this song was the last one played (from database)"""
+        """Check if this song was recently played (within last 5 minutes)"""
         if not self.stats_db:
             return False
         
         try:
-            # Get the last played song from the database
+            # Get recent songs from the database
             import sqlite3
             from pathlib import Path
+            from datetime import datetime, timedelta
             
             db_path = Path.home() / ".sdr_boombox_stats.db"
             if not db_path.exists():
@@ -692,20 +710,32 @@ class MetadataHandler(QtCore.QObject):
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
             
-            # Get the most recent song entry
-            cursor.execute("""
-                SELECT artist, title FROM songs 
-                ORDER BY timestamp DESC 
-                LIMIT 1
-            """)
+            # Get songs from the last 5 minutes on the same station/frequency
+            five_minutes_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
             
-            result = cursor.fetchone()
+            cursor.execute("""
+                SELECT artist, title, timestamp FROM songs 
+                WHERE timestamp > ? 
+                AND frequency = ?
+                AND hd_channel = ?
+                ORDER BY timestamp DESC
+            """, (five_minutes_ago, self.current_frequency, self.current_hd_channel))
+            
+            results = cursor.fetchall()
             conn.close()
             
-            if result:
-                last_artist, last_title = result
-                # Check if it matches the current song
-                return (last_artist == artist and last_title == title)
+            # Check if this exact song was played recently
+            for db_artist, db_title, db_timestamp in results:
+                if db_artist == artist and db_title == title:
+                    # Calculate time difference
+                    try:
+                        db_time = datetime.fromisoformat(db_timestamp)
+                        time_diff = datetime.now() - db_time
+                        # If played within last 5 minutes, it's likely a duplicate
+                        if time_diff.total_seconds() < 300:  # 5 minutes
+                            return True
+                    except:
+                        pass
             
         except Exception:
             # If there's any error, just proceed with logging
