@@ -914,14 +914,35 @@ class SDRBoombox(QtWidgets.QMainWindow):
 
 def main():
     """Main entry point"""
-    # Handle Ctrl+C gracefully
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # Custom signal handler for Ctrl+C that cleans up LOT files
+    def signal_handler(sig, frame):
+        print("\nReceived interrupt signal, cleaning up...")
+        try:
+            # Clean up LOT files on Ctrl+C
+            deleted = cleanup_lot_files(keep_recent=False)
+            if deleted > 0:
+                print(f"Cleaned up {deleted} LOT files")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        finally:
+            # Exit cleanly
+            if QtWidgets.QApplication.instance():
+                QtWidgets.QApplication.instance().quit()
+            else:
+                sys.exit(0)
+    
+    # Register the custom signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
     
     # Check for --stats flag
     if "--stats" in sys.argv:
         try:
             from boombox_stats import StatsViewer
             app = QtWidgets.QApplication(sys.argv)
+            # Allow Qt to process Python signal handlers
+            timer = QtCore.QTimer()
+            timer.timeout.connect(lambda: None)
+            timer.start(500)  # Process signals every 500ms
             viewer = StatsViewer()
             viewer.show()
             sys.exit(app.exec())
@@ -931,6 +952,10 @@ def main():
     else:
         # Normal boombox operation
         app = QtWidgets.QApplication(sys.argv)
+        # Allow Qt to process Python signal handlers
+        timer = QtCore.QTimer()
+        timer.timeout.connect(lambda: None)
+        timer.start(500)  # Process signals every 500ms
         w = SDRBoombox()
         w.show()
         sys.exit(app.exec())
