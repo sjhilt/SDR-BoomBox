@@ -211,6 +211,9 @@ class MetadataHandler(QtCore.QObject):
             # Emit station info updates
             if 'station_name' in updates or 'station_slogan' in updates:
                 self._update_station_display()
+                # Also update metadata display if we don't have song info
+                if not self.last_title and not self.last_artist:
+                    self._update_metadata_display()
             
             # Emit metadata updates for title/artist
             if 'title' in updates or 'artist' in updates:
@@ -512,11 +515,20 @@ class MetadataHandler(QtCore.QObject):
     def _update_metadata_display(self):
         """Update metadata display for title and artist"""
         if self.last_title and self.last_artist:
+            # We have both title and artist - show them
             self.metadataUpdate.emit(self.last_title, self.last_artist)
         elif self.last_title:
+            # Only title, no artist
             self.metadataUpdate.emit(self.last_title, "")
         elif self.last_artist:
+            # Only artist, no title
             self.metadataUpdate.emit("", self.last_artist)
+        elif self.station_name and self.station_slogan:
+            # No song info but we have station info - show station name and slogan
+            self.metadataUpdate.emit(self.station_name, self.station_slogan)
+        elif self.station_name:
+            # Only station name, no slogan or song info
+            self.metadataUpdate.emit(self.station_name, "")
     
     def set_frequency(self, frequency: float):
         """Set the current frequency for stats logging"""
