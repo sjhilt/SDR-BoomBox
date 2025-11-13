@@ -641,12 +641,60 @@ class MetadataHandler(QtCore.QObject):
             self.pending_song_log = None
             return
         
+        # Check if this was the last song played (from database)
+        # This prevents re-logging when restarting app or switching back to a station
+        if self.stats_db and self._is_last_played_song(artist, title):
+            if log_callback:
+                log_callback(f"[stats] Skipping last played song (likely app restart or station switch): {artist} - {title}")
+            # Update our session tracking but don't log to database
+            self.last_logged_song = current_song
+            self.pending_song_log = None
+            return
+        
         # Log the song
         self._log_to_stats(title, artist, album, log_callback)
         
         # Update last logged song
         self.last_logged_song = current_song
         self.pending_song_log = None
+    
+    def _is_last_played_song(self, artist: str, title: str) -> bool:
+        """Check if this song was the last one played (from database)"""
+        if not self.stats_db:
+            return False
+        
+        try:
+            # Get the last played song from the database
+            import sqlite3
+            from pathlib import Path
+            
+            db_path = Path.home() / ".sdr_boombox_stats.db"
+            if not db_path.exists():
+                return False
+            
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            # Get the most recent song entry
+            cursor.execute("""
+                SELECT artist, title FROM songs 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            """)
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                last_artist, last_title = result
+                # Check if it matches the current song
+                return (last_artist == artist and last_title == title)
+            
+        except Exception:
+            # If there's any error, just proceed with logging
+            pass
+        
+        return False
     
     def _log_to_stats(self, title: str, artist: str, album: str, log_callback=None):
         """Log song to stats database"""
