@@ -121,6 +121,9 @@ class MetadataHandler(QtCore.QObject):
         if m:
             t = m.group(1).strip()
             if t and t != self.last_title:
+                # Song changed - clear any existing art
+                if self.last_title:  # Only clear if we had a previous song
+                    self.artClear.emit()
                 self.last_title = t
                 self.has_lot_art = False  # Reset for new song
                 self.current_art_key = ""  # Reset art key for new song
@@ -132,6 +135,9 @@ class MetadataHandler(QtCore.QObject):
         if m:
             a = m.group(1).strip()
             if a and a != self.last_artist:
+                # Artist changed - clear any existing art
+                if self.last_artist:  # Only clear if we had a previous artist
+                    self.artClear.emit()
                 self.last_artist = a
                 self.has_lot_art = False
                 self.current_art_key = ""  # Reset art key for new song
@@ -204,13 +210,11 @@ class MetadataHandler(QtCore.QObject):
             # Emit metadata updates for title/artist
             if 'title' in updates or 'artist' in updates:
                 self._update_metadata_display()
-                # Clear art display when song changes (will be replaced if art is found)
-                if not self.has_lot_art:
-                    self.artClear.emit()
                 # Log to stats database if we have both title and artist
                 if self.last_title and self.last_artist:
                     self._log_to_stats(log_callback)
                 # Try to fetch iTunes art if we have both artist and title
+                # and we don't have LOT art yet
                 if self.last_title and self.last_artist and not self.has_lot_art:
                     self.fetch_itunes_art(self.last_artist, self.last_title, log_callback)
     
@@ -244,7 +248,7 @@ class MetadataHandler(QtCore.QObject):
                         self.current_art_key = f"LOT||{lot_file}"
                         self.artReady.emit(pm)
                         if log_callback:
-                            log_callback(f"[art] Album art loaded from LOT file: {lot_file}")
+                            log_callback(f"[art] Album art loaded from LOT file: {lot_file} (replacing any iTunes art)")
                     else:
                         if log_callback:
                             log_callback(f"[art] LOT file exists but couldn't load as image: {lot_file}")
@@ -348,11 +352,9 @@ class MetadataHandler(QtCore.QObject):
         if self.looks_like_station(artist) or self.looks_like_station(title):
             return
         
-        key = f"TRACK||{artist}||{title}"
+        key = f"iTunes||{artist}||{title}"
         if key == self.current_art_key:
-            return  # Already fetched
-        
-        self.current_art_key = key
+            return  # Already fetched for this song
         
         def fetch():
             try:
@@ -376,9 +378,17 @@ class MetadataHandler(QtCore.QObject):
                     pm = QtGui.QPixmap()
                     pm.loadFromData(raw)
                     if not pm.isNull():
-                        self.artReady.emit(pm)
-                        if log_callback:
-                            log_callback(f"[art] Album art retrieved from iTunes API successfully")
+                        # Check if song hasn't changed while we were fetching
+                        current_key = f"iTunes||{artist}||{title}"
+                        if current_key == f"iTunes||{self.last_artist}||{self.last_title}":
+                            # Update the art key to mark this as iTunes art
+                            self.current_art_key = current_key
+                            self.artReady.emit(pm)
+                            if log_callback:
+                                log_callback(f"[art] Album art retrieved from iTunes API successfully")
+                        else:
+                            if log_callback:
+                                log_callback(f"[art] Song changed while fetching iTunes art, discarding")
                     else:
                         if log_callback:
                             log_callback(f"[art] iTunes API returned invalid image data")
