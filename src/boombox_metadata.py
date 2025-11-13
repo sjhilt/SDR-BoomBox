@@ -58,6 +58,11 @@ class MetadataHandler(QtCore.QObject):
         self.station_logos = []  # List of logo info dicts
         self.current_logo_index = 0
         
+        # Song change tracking for delayed logging
+        self.pending_song_log = None
+        self.song_log_timer = None
+        self.last_song_change_time = 0
+        
         # Stats database
         self.stats_db = None
         self.songs_logged_count = 0  # Track songs for cleanup trigger

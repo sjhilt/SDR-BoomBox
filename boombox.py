@@ -885,6 +885,8 @@ class SDRBoombox(QtWidgets.QMainWindow):
         """Open or focus the map window"""
         if self.map_window is None or not self.map_window.isVisible():
             self.map_window = MapWindow(self.map_handler)
+            # Load existing maps from disk when opening the window
+            self.map_handler.load_existing_maps(log_callback=self._append_log)
             self.map_window.show()
         else:
             self.map_window.raise_()
