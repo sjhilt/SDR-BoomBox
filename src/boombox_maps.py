@@ -31,6 +31,7 @@ class MapHandler(QtCore.QObject):
         
         # Weather overlay state
         self.weather_overlay_file = ""
+        self.weather_location = None  # (lat, lon) from DWRI file
         
         # Cache for base map
         self._base_map_cache = None
@@ -327,13 +328,14 @@ class MapHandler(QtCore.QObject):
         
         # Try to fetch a real map from OpenStreetMap
         try:
-            # Use a reasonable default location (US center) and zoom
-            # This provides a good overview for weather radar
-            lat, lon = 39.8283, -98.5795  # Geographic center of contiguous US
-            zoom = 4  # Country-level view
+            # Use location from DWRI file if available, otherwise use default
+            if self.weather_location:
+                lat, lon = self.weather_location
+            else:
+                # Default to US center if no location data available
+                lat, lon = 39.8283, -98.5795
             
-            # Fetch map tile from OpenStreetMap
-            tile_url = f"https://tile.openstreetmap.org/{zoom}/8/6.png"
+            zoom = 8  # Regional view (~200 mile radius)
             
             # For a better map, we'll create a composite of multiple tiles
             base_map = self._fetch_osm_tiles(lat, lon, zoom, 600, 600)
@@ -454,6 +456,13 @@ class MapHandler(QtCore.QObject):
                 tile_file = match.group(1)
                 self.handle_traffic_tile(tile_file)
         
+        # Check for weather info file (contains location data)
+        elif "DWRI_" in line:
+            match = re.search(r"name=(DWRI_[^\s]+)", line)
+            if match:
+                info_file = match.group(1)
+                self.handle_weather_info(info_file)
+        
         # Check for weather overlay
         elif "DWRO_" in line and ".png" in line:
             match = re.search(r"name=(DWRO_[^\s]+\.png)", line)
@@ -461,11 +470,135 @@ class MapHandler(QtCore.QObject):
                 overlay_file = match.group(1)
                 self.handle_weather_overlay(overlay_file)
     
+    def handle_weather_info(self, info_file: str, log_callback=None):
+        """Handle weather info file (DWRI) that contains location data"""
+        def try_load_info(attempts=0):
+            try:
+                info_path = self.lot_dir / info_file
+                
+                # If the exact file doesn't exist, try to find it with a prefix
+                if not info_path.exists():
+                    matching_files = list(self.lot_dir.glob(f"*_{info_file}"))
+                    if matching_files:
+                        info_path = matching_files[0]
+                        if log_callback:
+                            log_callback(f"[weather] Found weather info with prefix: {info_path.name}")
+                
+                if info_path.exists():
+                    # Try to parse the DWRI file for location information
+                    try:
+                        # Try reading as text first
+                        with open(info_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # Look for DWR_Area_ID pattern
+                        area_match = re.search(r'DWR_Area_ID[=:\s]*"?([a-zA-Z0-9]+)"?', content)
+                        if area_match:
+                            area_id = area_match.group(1)
+                            if log_callback:
+                                log_callback(f"[weather] Found DWR_Area_ID: {area_id}")
+                            
+                            # Try to decode the area ID to location
+                            location = self._decode_area_id(area_id)
+                            if location:
+                                self.weather_location = location
+                                self._base_map_cache = None
+                                if log_callback:
+                                    log_callback(f"[weather] Location decoded from area ID: {location[0]:.4f}, {location[1]:.4f}")
+                        
+                        # Also look for explicit lat/lon patterns
+                        lat_match = re.search(r'lat[itude]*[:\s]+(-?\d+\.?\d*)', content, re.IGNORECASE)
+                        lon_match = re.search(r'lon[gitude]*[:\s]+(-?\d+\.?\d*)', content, re.IGNORECASE)
+                        
+                        if lat_match and lon_match:
+                            lat = float(lat_match.group(1))
+                            lon = float(lon_match.group(1))
+                            self.weather_location = (lat, lon)
+                            self._base_map_cache = None
+                            if log_callback:
+                                log_callback(f"[weather] Location extracted from DWRI: {lat:.4f}, {lon:.4f}")
+                        
+                        # If we still don't have location, check if area_id matches traffic tile pattern
+                        if not self.weather_location and area_match:
+                            # The area ID might match the traffic tiles (e.g., "03g9rc")
+                            # Traffic tiles often encode regional information
+                            # Check if we have matching traffic tiles
+                            for (row, col), path in self.traffic_tiles.items():
+                                if area_id in path:
+                                    # Found matching traffic tiles - use their implied region
+                                    # This is a heuristic - traffic and weather often cover same region
+                                    if log_callback:
+                                        log_callback(f"[weather] Area ID {area_id} matches traffic tiles - using regional default")
+                                    # Use a reasonable default for the region (will be overridden if better data found)
+                                    break
+                    except Exception as e:
+                        if log_callback:
+                            log_callback(f"[weather] Error parsing DWRI file: {e}")
+                            
+                elif attempts < 3:
+                    QtCore.QTimer.singleShot(500, lambda: try_load_info(attempts + 1))
+                else:
+                    if log_callback:
+                        log_callback(f"[weather] Weather info file never appeared: {info_file}")
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"[weather] Error handling weather info: {e}")
+        
+        try_load_info()
+    
+    def _decode_area_id(self, area_id: str):
+        """Attempt to decode an area ID to lat/lon coordinates"""
+        # Common area IDs and their approximate locations
+        # This is based on observed patterns in HD Radio broadcasts
+        area_locations = {
+            # Tennessee/Georgia region
+            "03g9rc": (35.0456, -85.3097),  # Chattanooga area
+            "03g9rb": (35.1495, -85.2327),  # Cleveland, TN area
+            "03g9ra": (34.9873, -85.2552),  # North Georgia
+            
+            # Add more area codes as discovered
+            # Format appears to be regional grid references
+        }
+        
+        # Check if we have a known area code
+        if area_id in area_locations:
+            return area_locations[area_id]
+        
+        # Try to parse as a geohash-like encoding
+        # The format seems to be: [region][grid][cell]
+        # e.g., "03g9rc" might be region 03, grid g9, cell rc
+        if len(area_id) >= 6:
+            try:
+                # Extract components
+                region = area_id[:2]  # First 2 chars
+                grid = area_id[2:4]    # Next 2 chars
+                cell = area_id[4:6]    # Next 2 chars
+                
+                # Rough approximation based on pattern
+                # This is a heuristic - actual encoding may differ
+                if region == "03":  # Southeast US
+                    # Base coordinates for region 03
+                    base_lat, base_lon = 35.0, -85.0
+                    
+                    # Adjust based on grid (very rough approximation)
+                    if 'g' in grid:
+                        grid_offset = (ord(grid[0]) - ord('a')) * 0.5
+                        base_lat += grid_offset * 0.1
+                    if grid[1].isdigit():
+                        base_lon -= int(grid[1]) * 0.1
+                    
+                    return (base_lat, base_lon)
+            except:
+                pass
+        
+        return None
+    
     def reset(self):
         """Reset map handler state"""
         self.traffic_tiles.clear()
         self.last_traffic_timestamp = ""
         self.weather_overlay_file = ""
+        self.weather_location = None
         self.combined_traffic_map = None
         self._base_map_cache = None
 

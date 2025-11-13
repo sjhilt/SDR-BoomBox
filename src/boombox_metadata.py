@@ -155,8 +155,8 @@ class MetadataHandler(QtCore.QObject):
                 lot_file = lot_match.group(2).strip()
                 
                 if lot_file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-                    # Skip traffic/weather files
-                    if any(x in lot_file for x in ['TMT_', 'DWRO_', 'DWRI_']):
+                    # Skip traffic/weather image files (but not DWRI info files)
+                    if any(x in lot_file for x in ['TMT_', 'DWRO_']):
                         return
                     
                     # Check if it's a station logo
