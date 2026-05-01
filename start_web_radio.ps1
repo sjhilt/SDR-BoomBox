@@ -1,0 +1,3 @@
+Set-Location $PSScriptRoot
+Write-Host Starting SDR-BoomBox web radio server...
+python web_radio_server.py

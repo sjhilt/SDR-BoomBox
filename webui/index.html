@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RTL-SDR Web Radio</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <link rel="stylesheet" href="/style.css?v=4">
+</head>
+<body>
+  <main class="page">
+    <section class="hero card">
+      <div>
+        <p class="eyebrow">RTL-SDR Remote Receiver</p>
+        <h1>HD Radio / FM over the web</h1>
+        <p class="subtle">Run the SDR on one machine and tune/listen from another browser.</p>
+      </div>
+      <div class="hero-right">
+        <div class="status-pill" id="status-pill">Disconnected</div>
+        <div class="hero-now-playing">
+          <div id="hero-title" class="hero-song-title">No track metadata yet</div>
+          <div id="hero-artist" class="hero-song-artist"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tabs card">
+      <div class="tab-buttons">
+        <button class="tab-button active" data-tab="radio-tab">Radio</button>
+        <button class="tab-button" data-tab="weather-tab">Weather / Maps</button>
+      </div>
+
+      <div id="radio-tab" class="tab-panel active">
+        <section class="grid top-grid">
+          <div class="card controls inner-card">
+            <h2>Tuner</h2>
+            <label>Frequency (MHz)<input id="frequency" type="number" min="64" max="108" step="0.1" value="103.7"></label>
+            <div class="row">
+              <label>Mode<select id="mode"><option value="hd">HD Radio</option><option value="fm">Analog FM</option></select></label>
+              <label>HD Program<select id="hd-program"><option value="0">HD1</option><option value="1">HD2</option><option value="2">HD3</option><option value="3">HD4</option></select></label>
+            </div>
+            <div class="row">
+              <label>Gain<input id="gain" type="number" step="0.1" value="0.0"></label>
+              <label>PPM<input id="ppm" type="number" step="1" value="5"></label>
+            </div>
+            <div class="row">
+              <label>Device Index<input id="device-index" type="number" step="1" value="0"></label>
+              <label class="checkbox"><input id="use-rtltcp" type="checkbox">Use rtl_tcp instead of direct USB</label>
+            </div>
+            <label>rtl_tcp Host<input id="rtltcp-host" type="text" value="127.0.0.1"></label>
+            <div class="button-row"><button id="play-btn" class="primary">Tune & Play</button><button id="stop-btn">Stop</button></div>
+          </div>
+
+          <div class="card now-playing inner-card">
+            <h2>Now Playing</h2>
+            <div class="meta-layout">
+              <div class="art-shell"><img id="album-art" alt="Album art"></div>
+              <div class="meta-copy">
+                <div class="meta-kicker" id="meta-station">Waiting for station…</div>
+                <h3 id="meta-title">No track metadata yet</h3>
+                <p id="meta-artist" class="meta-artist">Tune a station to populate artist/title.</p>
+                <p id="meta-album" class="meta-album"></p>
+                <div class="meta-badges">
+                  <span class="badge" id="meta-source">No source</span>
+                  <span class="badge muted" id="meta-updated">Not updated</span>
+                </div>
+              </div>
+            </div>
+            <h2>Audio</h2>
+            <audio id="player" controls autoplay></audio>
+            <p class="subtle tiny">If audio does not auto-start, press play in the browser control after tuning.</p>
+          </div>
+        </section>
+
+        <section class="grid">
+          <div class="card presets inner-card">
+            <h2>Quick Presets</h2>
+            <div id="preset-list" class="preset-list"></div>
+          </div>
+          <div class="card inner-card"><h2>Receiver Status</h2><dl id="status-grid" class="status-grid-list"></dl></div>
+        </section>
+      </div>
+
+      <div id="weather-tab" class="tab-panel">
+        <section class="card inner-card weather-now-playing">
+          <div class="weather-song-kicker">Current Song</div>
+          <div id="weather-song-title" class="weather-song-title">No track metadata yet</div>
+          <div id="weather-song-artist" class="weather-song-artist">Tune a station to populate song info.</div>
+        </section>
+        <section class="grid weather-grid">
+          <div class="card inner-card">
+            <h2>Traffic / Roads Map</h2>
+            <p class="subtle">This mirrors the standalone app’s 3x3 HD Radio traffic tile handling.</p>
+            <div id="traffic-grid" class="traffic-grid">
+              <div class="traffic-placeholder">No traffic tiles received yet.</div>
+            </div>
+          </div>
+          <div class="card inner-card">
+            <h2>Weather + Map Overlay</h2>
+            <p class="subtle">Weather radar overlaid on an interactive map, centered on coordinates from HD Radio data services.</p>
+            <div id="weather-map" class="weather-map"></div>
+            <div id="weather-placeholder" class="traffic-placeholder">No weather data received yet. Tune an HD Radio station to receive weather radar.</div>
+            <div class="weather-meta">
+              <div><strong>Info File:</strong> <span id="weather-info-file">-</span></div>
+              <div><strong>Location:</strong> <span id="weather-location">-</span></div>
+              <div><strong>Updated:</strong> <span id="maps-updated">-</span></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="card log-card">
+      <div class="log-header">
+        <h2>Live Logs</h2>
+        <button id="toggle-logs" class="log-toggle-button">Hide Log</button>
+      </div>
+      <pre id="logs" class="logs">Loading logs...</pre>
+    </section>
+  </main>
+  <script src="/app.js?v=4"></script>
+</body>
+</html>
+
+
