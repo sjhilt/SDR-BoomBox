@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from contextlib import asynccontextmanager
 import json
 import os
 import re
@@ -643,18 +644,19 @@ class RadioController:
 
 # FastAPI application instance and shared radio controller.
 controller = RadioController()
-app = FastAPI(title='RTL-SDR Web Radio')
-app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
 
 
-@app.on_event('startup')
-async def startup_event() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     controller.attach_loop(asyncio.get_running_loop())
+    try:
+        yield
+    finally:
+        controller.stop()
 
 
-@app.on_event('shutdown')
-async def shutdown_event() -> None:
-    controller.stop()
+app = FastAPI(title='RTL-SDR Web Radio', lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
 
 
 # Static frontend assets.
@@ -742,9 +744,6 @@ async def api_health() -> JSONResponse:
 
 # Local development entry point.
 if __name__ == '__main__':
-    import sys
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     import uvicorn
     uvicorn.run('web_radio_server:app', host='0.0.0.0', port=8000, reload=False)
 

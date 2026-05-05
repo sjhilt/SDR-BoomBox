@@ -6,7 +6,7 @@
   <title>RTL-SDR Web Radio</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <link rel="stylesheet" href="/style.css?v=4">
+  <link rel="stylesheet" href="/style.css?v=9">
 </head>
 <body>
   <main class="page">
@@ -42,7 +42,7 @@
             </div>
             <div class="row">
               <label>Gain<input id="gain" type="number" step="0.1" value="0.0"></label>
-              <label>PPM<input id="ppm" type="number" step="1" value="5"></label>
+              <label>PPM<input id="ppm" type="number" step="1" value="0"></label>
             </div>
             <div class="row">
               <label>Device Index<input id="device-index" type="number" step="1" value="0"></label>
@@ -80,6 +80,7 @@
           </div>
           <div class="card inner-card"><h2>Receiver Status</h2><dl id="status-grid" class="status-grid-list"></dl></div>
         </section>
+
       </div>
 
       <div id="weather-tab" class="tab-panel">
@@ -118,7 +119,7 @@
       <pre id="logs" class="logs">Loading logs...</pre>
     </section>
   </main>
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=9"></script>
 </body>
 </html>
 

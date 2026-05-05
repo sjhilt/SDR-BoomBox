@@ -25,22 +25,6 @@ A modern GUI-driven HD Radio (NRSC-5) and analog FM receiver for Software Define
 - **Metadata Display**: Show station name, slogan, song title, artist, and album
 - **Album Art**: Automatic artwork fetching from iTunes API based on song metadata
 
-### Web Interface (NEW)
-
-Run the SDR on one machine and tune/listen from any browser on the network.
-
-![Web UI - Hero & Tabs](https://raw.githubusercontent.com/sjhilt/SDR-BoomBox/refs/heads/main/resources/webui_hero.png)
-
-![Web UI - Tuner Controls](https://raw.githubusercontent.com/sjhilt/SDR-BoomBox/refs/heads/main/resources/webui_tuner.png)
-
-- **Remote Tuning**: Control frequency, mode (HD/FM), HD program, gain, and PPM from the browser
-- **Live Audio Streaming**: Streams decoded audio over HTTP for browser playback
-- **Now Playing Metadata**: Real-time station name, song title, artist, and album art
-- **Weather & Traffic Maps**: Leaflet-powered interactive maps with weather radar overlay
-- **rtl_tcp Support**: Use a remote RTL-SDR over the network via rtl_tcp
-- **Dark Themed UI**: Sleek, responsive dark design with glassmorphism cards
-- **Multi-Client**: Multiple browsers can connect to the same SDR server
-
 ### Advanced Features
 - **Preset Management**: 4 preset slots with right-click save/load functionality
 - **Persistent Settings**: Presets saved to `~/.sdr_boombox_presets.json`
@@ -77,21 +61,16 @@ pip install -r requirements.txt
 Required package:
 - `PySide6` - Qt GUI framework for the application interface
 
-#### Web Interface Dependencies
-```bash
-pip install fastapi uvicorn
-```
-
 ## Installation
 
 1. **Install RTL-SDR drivers**:
    ```bash
    # macOS (using Homebrew)
    brew install rtl-sdr
-
+   
    # Linux (Debian/Ubuntu)
    sudo apt-get install rtl-sdr
-
+   
    # Windows
    # Download and install from https://osmocom.org/projects/rtl-sdr/
    ```
@@ -111,10 +90,10 @@ pip install fastapi uvicorn
    ```bash
    # macOS
    brew install ffmpeg
-
+   
    # Linux
    sudo apt-get install ffmpeg
-
+   
    # Windows
    # Download from https://ffmpeg.org/download.html
    ```
@@ -126,7 +105,7 @@ pip install fastapi uvicorn
 
 ## Usage
 
-### Desktop Application
+### Basic Operation
 
 1. **Launch the application**:
    ```bash
@@ -146,35 +125,6 @@ pip install fastapi uvicorn
    - Click the speaker icon (🔊) to mute/unmute audio
    - When muted, shows 🔇 and the receiver keeps running
    - Unmuting is instant with no re-tuning delay
-
-### Web Interface
-
-The web interface lets you run the SDR server on one machine and tune/listen from any browser on your network.
-
-1. **Start the web server**:
-   ```bash
-   # Linux / macOS
-   python web_radio_server.py
-
-   # Windows
-   start_web_radio.bat
-   # or
-   powershell -File start_web_radio.ps1
-   ```
-
-2. **Open in browser**:
-   Navigate to `http://<server-ip>:8000` from any device on your network.
-
-3. **Tune & Listen**:
-   - Enter a frequency (e.g. `103.7`)
-   - Select mode (HD Radio or FM)
-   - Choose HD program (HD1–HD4) if using HD Radio
-   - Click **Tune & Play** to start streaming audio to your browser
-   - Now Playing metadata and album art update in real time
-
-4. **Weather / Maps tab**:
-   - Switch to the Weather / Maps tab for interactive Leaflet maps
-   - Weather radar overlay and traffic data from HD Radio data services
 
 ### Preset Management
 
@@ -251,11 +201,6 @@ RTL-SDR → nrsc5 → stdout (PCM) → ffplay
 RTL-SDR → rtl_fm (WBFM) → stdout (S16LE) → ffplay
 ```
 
-**Web Interface Mode**:
-```
-RTL-SDR → nrsc5/rtl_fm → FastAPI → HTTP audio stream → Browser <audio>
-```
-
 **Mute Implementation**:
 - Uses ffplay's `-volume 0` parameter to silence audio
 - Keeps nrsc5/rtl_fm decoder running for instant unmute
@@ -265,7 +210,7 @@ RTL-SDR → nrsc5/rtl_fm → FastAPI → HTTP audio stream → Browser <audio>
 
 The app parses nrsc5 stderr output for:
 - Station name
-- Station slogan
+- Station slogan  
 - Song title
 - Artist name
 - Album name
@@ -297,11 +242,6 @@ When song metadata is detected:
 - May indicate weak signal - adjust antenna
 - Try increasing gain value
 
-**Web interface not loading**
-- Ensure `fastapi` and `uvicorn` are installed (`pip install fastapi uvicorn`)
-- Check that port 8000 is not in use by another application
-- Verify the server started without errors in the terminal
-
 ### Debug Mode
 
 Monitor the built-in log window for:
@@ -320,19 +260,8 @@ This project is released under the MIT License. See the source code for full lic
 - [rtl-sdr](https://osmocom.org/projects/rtl-sdr/) - SDR driver and utilities
 - [FFmpeg](https://ffmpeg.org/) - Audio playback
 - [PySide6](https://doc.qt.io/qtforpython/) - Qt GUI framework
-- [FastAPI](https://fastapi.tiangolo.com/) - Web interface backend
-- [Leaflet](https://leafletjs.com/) - Interactive maps
 
 ## Changelog
-
-### Version 1.1.0
-- **NEW: Web Interface** — Run the SDR on one machine and tune/listen from any browser
-- FastAPI-powered backend with HTTP audio streaming
-- Real-time now-playing metadata and album art in the browser
-- Dark-themed responsive web UI with glassmorphism design
-- Weather & traffic maps via Leaflet with radar overlay
-- rtl_tcp support for remote RTL-SDR devices
-- Windows launch scripts (`start_web_radio.bat` / `.ps1`)
 
 ### Version 1.0.6
 - **Added mute button functionality**: Instantly mute/unmute without stopping the receiver
@@ -391,3 +320,30 @@ Contributions, issues, and feature requests are welcome! Feel free to check the 
 ## ⭐ Show your support
 
 Give a ⭐️ if this project helped you enjoy HD Radio and FM broadcasts!
+
+
+## Web Radio Server
+
+This project also includes a browser-based remote control and listening interface:
+
+- `web_radio_server.py` - FastAPI backend for tuning, streaming audio, metadata, and map data
+- `webui/` - browser frontend with Radio and Weather/Maps tabs
+
+### Run the web interface
+
+```bash
+pip install -r requirements.txt
+python web_radio_server.py
+```
+
+Then open:
+
+```text
+http://localhost:8000
+```
+
+The web interface includes:
+- remote tuning and playback
+- Now Playing metadata and album art
+- Traffic / Roads map tab
+- Weather overlay tab using HD Radio LOT map assets
